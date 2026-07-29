@@ -6,25 +6,26 @@ import {
   DEFAULT_CONFIG_DIR,
   ProjectAudit,
   ResolvedConsumer,
-  Verdict,
   WindowState,
   auditProjects,
+  cliError,
+  cliStatus,
   effectiveEmail,
   effectiveOrg,
-  expandHome,
-  hasConsumerMismatch,
   isExplicitDir,
-  isLoggedIn,
   isVerified,
-  judge,
   primaryConsumer,
-  readWindowState,
-  resolveClaudePath,
+  realConsumers,
+  storeKey,
+  storeLabel,
   tilde,
-  verifyWindowState,
-  watchTargets,
+  verdictFor,
   windowVerdict,
+  worstConsumer,
+  watchTargets,
 } from './accountReader';
+import { config, currentFolderPath, loadWindowState, projectsRoot } from './settings';
+import { verdictCopy } from './verdictCopy';
 
 export class AccountItem extends vscode.TreeItem {
   children?: AccountItem[];
@@ -33,8 +34,12 @@ export class AccountItem extends vscode.TreeItem {
   /** File opened by claudeAccount.openFile. */
   filePath?: string;
 
-  constructor(label: string, collapsed?: vscode.TreeItemCollapsibleState) {
+  constructor(id: string, label: string, collapsed?: vscode.TreeItemCollapsibleState) {
     super(label, collapsed ?? vscode.TreeItemCollapsibleState.None);
+    // A stable id keeps expansion state and selection across the frequent
+    // refreshes this extension does; without it VS Code derives identity from
+    // the label path and collapses nodes under the user.
+    this.id = id;
   }
 }
 
@@ -42,110 +47,55 @@ function icon(id: string, color?: string): vscode.ThemeIcon {
   return new vscode.ThemeIcon(id, color ? new vscode.ThemeColor(color) : undefined);
 }
 
-export function config() {
-  return vscode.workspace.getConfiguration('claudeAccount');
+/** Context for the verdict copy of a given consumer. */
+export function copyContextFor(state: WindowState, consumer: ResolvedConsumer) {
+  const { snapshot } = consumer;
+  return {
+    email: effectiveEmail(snapshot),
+    expected: state.expectedAccount,
+    store: storeLabel(snapshot),
+    offender: consumer.kind === 'terminal' ? undefined : consumer.name,
+    apiKeySource: cliStatus(snapshot)?.apiKeySource,
+    verified: isVerified(snapshot),
+    shared: !state.isolated,
+  };
 }
 
-export function workspaceRoot(): string | undefined {
-  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+export function windowCopy(state: WindowState) {
+  const consumer = worstConsumer(state);
+  return verdictCopy(windowVerdict(state), copyContextFor(state, consumer));
 }
 
-export function expectedAccount(): string | undefined {
-  const value = config().get<string>('expectedAccount', '');
-  return value && value.trim() ? value.trim() : undefined;
-}
-
-export function projectsRoot(workspace: string | undefined): string | undefined {
-  const configured = config().get<string>('projectsRoot', '');
-  if (configured && configured.trim()) {
-    return expandHome(configured);
-  }
-  return workspace ? path.dirname(workspace) : undefined;
-}
-
-/** Read the window state and verify it against the live CLI. */
-export async function loadWindowState(): Promise<WindowState> {
-  const state = readWindowState(workspaceRoot(), expectedAccount());
-  if (config().get<boolean>('verifyWithCli', true)) {
-    await verifyWindowState(state, resolveClaudePath(config().get<string>('claudePath', '')));
-  }
-  return state;
-}
-
-// ---------------------------------------------------------------------------
-// Verdict presentation — the part that must be unmissable
-// ---------------------------------------------------------------------------
-
-export interface VerdictStyle {
-  label: string;
-  themeIcon: string;
-  color?: string;
-  /** Status bar codicon. */
-  badge: string;
-  /** Status bar background, for the two states that need shouting about. */
-  background?: 'error' | 'warning';
-}
-
-export function verdictStyle(verdict: Verdict): VerdictStyle {
-  switch (verdict) {
-    case 'correct':
-      return { label: 'CORRECT ACCOUNT', themeIcon: 'pass-filled', color: 'charts.green', badge: '$(pass-filled)' };
-    case 'wrong':
-      return {
-        label: 'WRONG ACCOUNT',
-        themeIcon: 'error',
-        color: 'charts.red',
-        badge: '$(error)',
-        background: 'error',
-      };
-    case 'not-logged-in':
-      return {
-        label: 'NOT LOGGED IN',
-        themeIcon: 'circle-slash',
-        color: 'charts.yellow',
-        badge: '$(circle-slash)',
-        background: 'warning',
-      };
-    case 'unverified':
-      return { label: 'UNVERIFIED', themeIcon: 'question', color: 'charts.yellow', badge: '$(question)' };
-    case 'no-expectation':
-      return { label: 'No expected account set', themeIcon: 'info', badge: '$(account)' };
-  }
-}
-
-function accountTooltip(snapshot: AccountSnapshot, heading: string): vscode.MarkdownString {
+export function accountTooltip(snapshot: AccountSnapshot, heading: string): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   md.appendMarkdown(`**${heading}**\n\n`);
 
-  const email = effectiveEmail(snapshot);
-  md.appendMarkdown(`- Account: \`${email ?? 'none'}\`\n`);
+  const status = cliStatus(snapshot);
+  md.appendMarkdown(`- Account: \`${effectiveEmail(snapshot) ?? 'none'}\`\n`);
   const org = effectiveOrg(snapshot);
   if (org) {
     md.appendMarkdown(`- Organization: ${org}\n`);
   }
-  if (snapshot.cli?.subscriptionType) {
-    md.appendMarkdown(`- Plan: ${snapshot.cli.subscriptionType}\n`);
+  if (status?.subscriptionType) {
+    md.appendMarkdown(`- Plan: ${status.subscriptionType}\n`);
   }
-  if (snapshot.cli?.authMethod) {
-    md.appendMarkdown(`- Auth method: ${snapshot.cli.authMethod}\n`);
+  if (status?.authMethod) {
+    md.appendMarkdown(`- Auth method: ${status.authMethod}\n`);
   }
-  if (snapshot.cli?.apiKeySource) {
-    md.appendMarkdown(
-      `- **API key in use:** \`${snapshot.cli.apiKeySource}\` — this supersedes the OAuth login\n`
-    );
+  if (status?.apiKeySource) {
+    md.appendMarkdown(`- **API key in use:** \`${status.apiKeySource}\` — supersedes the OAuth login\n`);
   }
-  md.appendMarkdown(
-    `- \`${CONFIG_DIR_VAR}\`: \`${tilde(snapshot.configDir)}\` _(${snapshot.source})_\n`
-  );
+  md.appendMarkdown(`- Store: ${storeLabel(snapshot)} _(${snapshot.source})_\n`);
 
   if (isVerified(snapshot)) {
-    md.appendMarkdown(`- Source: **live \`claude auth status\`** for this config dir\n`);
+    md.appendMarkdown('- Source: **live `claude auth status`** for this store\n');
   } else {
     md.appendMarkdown(
-      `- Source: on-disk ${snapshot.accountFile ? `\`${tilde(snapshot.accountFile)}\`` : '_no account file found_'} (CLI not consulted)\n`
+      `- Source: on-disk ${snapshot.accountFile ? `\`${tilde(snapshot.accountFile)}\`` : '_no account file found_'}\n`
     );
-    if (snapshot.cliError) {
-      md.appendMarkdown(`- CLI error: ${snapshot.cliError}\n`);
+    const error = cliError(snapshot);
+    if (error) {
+      md.appendMarkdown(`- CLI error: ${error}\n`);
     }
   }
   if (snapshot.error) {
@@ -160,20 +110,71 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
   private _onDidChangeTreeData = new vscode.EventEmitter<AccountItem | undefined | null | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  /** Fires after each load so the status bar and alerts can react. */
+  /** Fires after every load so ambient surfaces can react even when hidden. */
   private _onDidLoad = new vscode.EventEmitter<WindowState>();
   readonly onDidLoad = this._onDidLoad.event;
 
   private watchers: vscode.Disposable[] = [];
   private timer: NodeJS.Timeout | undefined;
+  private debounce: NodeJS.Timeout | undefined;
+  private watched: string = '';
+
+  private state: WindowState | undefined;
+  private inFlight: Promise<WindowState> | undefined;
+  private generation = 0;
+  lastLoadedAt = 0;
 
   constructor() {
-    this.rewatch();
+    this.restartWatchers();
+    this.restartPolling();
+  }
+
+  /**
+   * Read and verify, coalescing concurrent callers.
+   *
+   * Every ambient surface is driven from here rather than from `getChildren`,
+   * because VS Code only calls `getChildren` while the view is visible — which
+   * previously froze the status bar and the wrong-account alert for the whole
+   * life of a window whose Explorer was not selected.
+   */
+  async load(): Promise<WindowState> {
+    if (this.inFlight) {
+      return this.inFlight;
+    }
+    const generation = ++this.generation;
+    this.inFlight = loadWindowState().finally(() => {
+      this.inFlight = undefined;
+    });
+
+    const state = await this.inFlight;
+    if (generation !== this.generation) {
+      return state; // A newer load already won; do not publish stale data.
+    }
+
+    this.state = state;
+    this.lastLoadedAt = Date.now();
+    this.restartWatchers(state);
+    this._onDidLoad.fire(state);
+    this._onDidChangeTreeData.fire();
+    return state;
+  }
+
+  /**
+   * Trailing-edge debounce. The CLI rewrites several files during one login, and
+   * driving a load per write would turn a sign-in into a subprocess storm.
+   */
+  scheduleLoad(delayMs = 400): void {
+    if (this.debounce) {
+      clearTimeout(this.debounce);
+    }
+    this.debounce = setTimeout(() => {
+      this.debounce = undefined;
+      void this.load();
+    }, delayMs);
   }
 
   refresh(): void {
-    this.rewatch();
-    this._onDidChangeTreeData.fire();
+    void this.load();
   }
 
   getTreeItem(element: AccountItem): vscode.TreeItem {
@@ -184,38 +185,36 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     if (element) {
       return element.children ?? [];
     }
-    // A new root render is a new read.
-    const state = await loadWindowState();
-    this._onDidLoad.fire(state);
-    return this.buildRoot(state);
+    // An empty root is what lets viewsWelcome render its onboarding copy.
+    if (!vscode.workspace.workspaceFolders) {
+      return [];
+    }
+    return this.buildRoot(this.state ?? (await this.load()));
   }
 
   private buildRoot(state: WindowState): AccountItem[] {
     const items: AccountItem[] = [this.verdictItem(state)];
-    const primary = primaryConsumer(state);
 
-    items.push(this.accountItem(primary));
-    items.push(this.configDirItem(primary.snapshot));
+    if (windowVerdict(state) === 'wrong' || windowVerdict(state) === 'api-key') {
+      items.push(this.expectedItem(state));
+    }
+    items.push(this.storeItem(state));
 
-    const mismatch = this.mismatchItem(state);
-    if (mismatch) {
-      items.push(mismatch);
+    const notIsolated = this.notIsolatedItem(state);
+    if (notIsolated) {
+      items.push(notIsolated);
+    }
+    const leak = this.repoLeakItem(state);
+    if (leak) {
+      items.push(leak);
+    }
+    if (state.overrides.kind === 'unreadable') {
+      items.push(this.unreadableItem(state.overrides.file, state.overrides.error));
     }
 
-    items.push(...this.apiKeyItems(state));
-
-    const trap = this.defaultDirTrapItem(state);
-    if (trap) {
-      items.push(trap);
-    }
-
-    if (state.overrides.error) {
-      const item = new AccountItem('Workspace settings unreadable');
-      item.description = 'see tooltip';
-      item.iconPath = icon('error', 'charts.red');
-      item.tooltip = state.overrides.error;
-      item.filePath = state.overrides.file ?? undefined;
-      items.push(item);
+    const overrides = this.overridesItem(state);
+    if (overrides) {
+      items.push(overrides);
     }
 
     items.push(this.consumersItem(state));
@@ -224,121 +223,206 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     if (projects) {
       items.push(projects);
     }
-
     return items;
   }
 
-  /** The headline row: is this the account this project is supposed to use? */
+  /** The headline: is this the account this project is supposed to use? */
   private verdictItem(state: WindowState): AccountItem {
-    const verdict = windowVerdict(state);
-    const style = verdictStyle(verdict);
-    const snapshot = primaryConsumer(state).snapshot;
-    const email = effectiveEmail(snapshot);
+    const consumer = worstConsumer(state);
+    const copy = windowCopy(state);
 
-    const item = new AccountItem(style.label);
-    item.iconPath = icon(style.themeIcon, style.color);
-
-    const md = new vscode.MarkdownString();
-    switch (verdict) {
-      case 'correct':
-        item.description = email;
-        md.appendMarkdown(
-          `\`${email}\` matches the expected account for this project (\`${state.expectedAccount}\`), confirmed by a live \`claude auth status\`.`
-        );
-        break;
-      case 'wrong':
-        item.description = `${email} — expected ${state.expectedAccount}`;
-        md.appendMarkdown(
-          `**This project expects \`${state.expectedAccount}\` but Claude Code is signed in as \`${email}\`.**\n\n` +
-            `Run **Claude Account: Log In For This Config Dir** and sign in with the right account, or update \`claudeAccount.expectedAccount\` if the expectation is wrong.`
-        );
-        break;
-      case 'not-logged-in':
-        item.description = tilde(snapshot.configDir);
-        md.appendMarkdown(
-          `No account is logged in for \`${tilde(snapshot.configDir)}\`.\n\n` +
-            `Run **Claude Account: Log In For This Config Dir** to sign in.`
-        );
-        break;
-      case 'unverified':
-        item.description = email;
-        md.appendMarkdown(
-          `\`${email}\` was read from disk, but the live CLI check did not run, so this is not confirmed.\n\n` +
-            (snapshot.cliError ? `CLI error: ${snapshot.cliError}` : 'Enable `claudeAccount.verifyWithCli`.')
-        );
-        break;
-      case 'no-expectation':
-        item.description = email ?? 'not logged in';
-        md.appendMarkdown(
-          `Signed in as \`${email}\`. No expected account is set for this project, so there is nothing to check it against.\n\n` +
-            `Run **Claude Account: Set Expected Account For This Project** to pin the account this project should use.`
-        );
-        item.command = { command: 'claudeAccount.setExpectedAccount', title: 'Set Expected Account' };
-        break;
-    }
-    item.tooltip = md;
-    return item;
-  }
-
-  private accountItem(consumer: ResolvedConsumer): AccountItem {
-    const { snapshot } = consumer;
-    const email = effectiveEmail(snapshot);
-    const item = new AccountItem(email ?? 'Not logged in');
-
-    const bits = [effectiveOrg(snapshot), snapshot.cli?.subscriptionType].filter(Boolean);
-    item.description =
-      bits.length > 0 ? bits.join(' · ') : isLoggedIn(snapshot) ? undefined : 'use the Log In command';
-
-    item.iconPath = snapshot.error
-      ? icon('error', 'charts.red')
-      : isVerified(snapshot)
-        ? isLoggedIn(snapshot)
-          ? icon('verified-filled', 'charts.green')
-          : icon('circle-slash', 'charts.yellow')
-        : icon('question', 'charts.yellow');
-
-    item.tooltip = accountTooltip(snapshot, `Account for ${consumer.name.toLowerCase()}`);
+    const item = new AccountItem('verdict', copy.label);
+    item.description = copy.treeDescription;
+    item.iconPath = icon(copy.icon, copy.color);
     item.contextValue = 'copyable';
-    item.copyValue = email ?? '';
-    item.command = { command: 'claudeAccount.showDetails', title: 'Show Details' };
+    item.copyValue = effectiveEmail(consumer.snapshot) ?? '';
+    item.command = { command: copy.command, title: copy.label };
+
+    const tooltip = new vscode.MarkdownString(`${copy.detail}\n\n`);
+    tooltip.appendMarkdown(accountTooltip(consumer.snapshot, consumer.name).value);
+    item.tooltip = tooltip;
     return item;
   }
 
-  private configDirItem(snapshot: AccountSnapshot): AccountItem {
-    const item = new AccountItem(tilde(snapshot.configDir));
+  private expectedItem(state: WindowState): AccountItem {
+    const item = new AccountItem('expected', 'Expected');
+    item.description = state.expectedAccount;
+    item.iconPath = icon('pin', 'charts.blue');
+    item.tooltip = new vscode.MarkdownString(
+      `This project is pinned to \`${state.expectedAccount}\`. Change it with **Pin Expected Account**, or switch which account the project uses with **Use a Specific Account For This Project**.`
+    );
+    item.command = { command: 'claudeAccount.setExpectedAccount', title: 'Pin Expected Account' };
+    return item;
+  }
+
+  private storeItem(state: WindowState): AccountItem {
+    const snapshot = primaryConsumer(state).snapshot;
+    const item = new AccountItem('store', storeLabel(snapshot));
     item.description = snapshot.source;
     item.iconPath = icon('folder-library');
     item.tooltip = new vscode.MarkdownString(
-      `\`${CONFIG_DIR_VAR}\` in effect for the integrated terminal.\n\n` +
-        `On macOS, credentials are stored in the Keychain keyed by this path, so a distinct dir is a fully distinct login.`
+      `The credential store the integrated terminal uses.\n\n` +
+        `On macOS, credentials are stored in the Keychain keyed by \`${CONFIG_DIR_VAR}\`, so a distinct dir is a fully distinct login. ` +
+        `Leaving the variable unset is itself a distinct store — not the same as setting it to \`${tilde(DEFAULT_CONFIG_DIR)}\`.`
     );
     item.contextValue = 'copyable';
     item.copyValue = snapshot.configDir;
+    if (state.overrides.kind === 'parsed') {
+      item.contextValue = 'copyable openable';
+      item.filePath = state.overrides.file;
+    }
     return item;
   }
 
-  private mismatchItem(state: WindowState): AccountItem | undefined {
-    if (!hasConsumerMismatch(state)) {
+  /**
+   * The row that turns "this project shares a login" from an invisible default
+   * into a one-click fix.
+   */
+  private notIsolatedItem(state: WindowState): AccountItem | undefined {
+    if (!state.workspaceRoot || state.isolated) {
       return undefined;
     }
-    const item = new AccountItem('Terminal and sidebar disagree');
-    item.description = 'expand "Who uses what"';
-    item.iconPath = icon('warning', 'charts.yellow');
+    const item = new AccountItem('notIsolated', 'Not isolated');
+    item.description = 'shares one login with every other project';
+    item.iconPath = icon('warning', 'problemsWarningIcon.foreground');
+    item.command = {
+      command: 'claudeAccount.useAccountForThisProject',
+      title: 'Use a Specific Account For This Project',
+    };
     item.tooltip = new vscode.MarkdownString(
-      'The integrated terminal and the Claude Code sidebar resolve different config dirs, so they can be signed in as different accounts in this same window. Expand **Who uses what** for the breakdown.'
+      state.processConfigDir
+        ? `This window inherits \`${CONFIG_DIR_VAR}\` from its environment, but the folder itself declares nothing — so the isolation is not part of the project and will not follow it.\n\nClick to give this folder its own account.`
+        : `This folder declares no \`${CONFIG_DIR_VAR}\`, so it uses the same credential store as every other unconfigured project. Signing in here changes the account for all of them.\n\nClick to give this folder its own account.`
     );
     return item;
   }
 
   /**
-   * Pointing CLAUDE_CONFIG_DIR at `~/.claude` looks like "use the default
-   * account" but is a separate, usually empty, credential store. Worth calling
-   * out, because the symptom is a mysteriously logged-out project.
+   * A committed settings file carrying a personal CLAUDE_CONFIG_DIR is a change
+   * your teammates would receive. Worth saying out loud, because git status is
+   * the only other place it shows up and it looks like an ordinary edit.
    */
-  private defaultDirTrapItem(state: WindowState): AccountItem | undefined {
-    const offender = state.consumers.find(
+  private repoLeakItem(state: WindowState): AccountItem | undefined {
+    if (!state.isolated || state.overrides.kind !== 'parsed') {
+      return undefined;
+    }
+    if (state.settingsTracking !== 'tracked') {
+      return undefined;
+    }
+
+    const item = new AccountItem('repoLeak', 'Committed to this repo');
+    item.description = 'teammates would get your config dir';
+    item.iconPath = icon('source-control', 'problemsWarningIcon.foreground');
+    item.tooltip = new vscode.MarkdownString(
+      `\`${tilde(state.overrides.file)}\` is tracked by git and declares \`${CONFIG_DIR_VAR}\`, which is a machine-local fact about **your** login — not something your teammates want.\n\n` +
+        'Fix it one of these ways:\n\n' +
+        '- **Use a Specific Account For This Project** again and choose *All my projects*, which writes to user settings and leaves the repo alone\n' +
+        `- \`git update-index --skip-worktree ${path.relative(state.workspaceRoot ?? '', state.overrides.file)}\` to mask your local edit\n` +
+        '- Move the folder into an external `.code-workspace` file kept outside the repo'
+    );
+    item.contextValue = 'openable';
+    item.filePath = state.overrides.file;
+    return item;
+  }
+
+  private unreadableItem(file: string, error: string): AccountItem {
+    const item = new AccountItem('overridesError', 'Workspace settings unreadable');
+    item.description = tilde(file);
+    item.iconPath = icon('error', 'problemsErrorIcon.foreground');
+    item.tooltip = new vscode.MarkdownString(
+      `${error}\n\nThe setup flow refuses to write to this file until it parses.`
+    );
+    item.contextValue = 'openable';
+    item.filePath = file;
+    item.command = { command: 'claudeAccount.openFile', title: 'Open', arguments: [item] };
+    return item;
+  }
+
+  /**
+   * Everything that can supersede or undermine the account, under one node so a
+   * window with several of them cannot push the rest of the tree below the fold.
+   */
+  private overridesItem(state: WindowState): AccountItem | undefined {
+    const children: AccountItem[] = [];
+    const snapshot = primaryConsumer(state).snapshot;
+
+    const apiKeySource = cliStatus(snapshot)?.apiKeySource;
+    if (apiKeySource) {
+      const child = new AccountItem(`apikey:live:${apiKeySource}`, `API key in use: ${apiKeySource}`);
+      child.description = 'supersedes the login';
+      child.iconPath = icon('key', 'problemsErrorIcon.foreground');
+      child.tooltip = new vscode.MarkdownString(
+        `\`claude auth status\` reports it is using an API key from \`${apiKeySource}\`. Requests are billed to that key, not to the account shown above.`
+      );
+      children.push(child);
+    }
+
+    for (const name of state.processApiKeyVars) {
+      const child = new AccountItem(`apikey:env:${name}`, `${name} is set`);
+      child.description = "this window's environment";
+      child.iconPath = icon('warning', 'problemsWarningIcon.foreground');
+      child.tooltip = new vscode.MarkdownString(
+        `\`${name}\` is present in this window's environment. Claude Code prefers it over any logged-in account.`
+      );
+      children.push(child);
+    }
+
+    for (const entry of state.settingsApiKeys) {
+      const child = new AccountItem(`apikey:file:${entry.variable}:${entry.file}`, `${entry.variable} in settings`);
+      child.description = tilde(entry.file);
+      child.iconPath = icon('warning', 'problemsWarningIcon.foreground');
+      child.tooltip = new vscode.MarkdownString(
+        `\`${entry.variable}\` is declared in \`${tilde(entry.file)}\`. An API key takes precedence over a logged-in account.`
+      );
+      child.contextValue = 'openable';
+      child.filePath = entry.file;
+      child.command = { command: 'claudeAccount.openFile', title: 'Open', arguments: [child] };
+      children.push(child);
+    }
+
+    for (const problem of state.settingsProblems) {
+      const child = new AccountItem(`problem:${problem.file}`, 'Settings file unreadable');
+      child.description = tilde(problem.file);
+      child.iconPath = icon('error', 'problemsErrorIcon.foreground');
+      child.tooltip = new vscode.MarkdownString(
+        `\`${tilde(problem.file)}\` could not be parsed (${problem.error}), so any \`env\` block in it — including an API key — is not being checked.`
+      );
+      child.contextValue = 'openable';
+      child.filePath = problem.file;
+      child.command = { command: 'claudeAccount.openFile', title: 'Open', arguments: [child] };
+      children.push(child);
+    }
+
+    const trap = this.defaultDirTrapChild(state);
+    if (trap) {
+      children.push(trap);
+    }
+
+    if (children.length === 0) {
+      return undefined;
+    }
+
+    const item = new AccountItem(
+      'overrides',
+      'Account overrides',
+      children.length > 2
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.Expanded
+    );
+    item.description = `${children.length} in effect`;
+    item.iconPath = icon('warning', 'problemsWarningIcon.foreground');
+    item.children = children;
+    return item;
+  }
+
+  /**
+   * Pointing CLAUDE_CONFIG_DIR at `~/.claude` looks like "use the default
+   * account" but is a separate, usually empty, store. The symptom is a
+   * mysteriously logged-out project.
+   */
+  private defaultDirTrapChild(state: WindowState): AccountItem | undefined {
+    const offender = realConsumers(state).find(
       consumer =>
-        !consumer.diagnosticOnly &&
         isExplicitDir(consumer.snapshot.source) &&
         path.resolve(consumer.snapshot.configDir) === DEFAULT_CONFIG_DIR
     );
@@ -346,73 +430,53 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
       return undefined;
     }
 
-    const item = new AccountItem(`${CONFIG_DIR_VAR} is set to the default dir`);
+    const item = new AccountItem('trap', `${CONFIG_DIR_VAR} is set to the default dir`);
     item.description = 'not the same as leaving it unset';
-    item.iconPath = icon('warning', 'charts.yellow');
+    item.iconPath = icon('warning', 'problemsWarningIcon.foreground');
     item.tooltip = new vscode.MarkdownString(
       `\`${CONFIG_DIR_VAR}\` is explicitly set to \`${tilde(DEFAULT_CONFIG_DIR)}\`.\n\n` +
-        `That is **not** equivalent to leaving it unset: an explicit value selects a separate credential store at ` +
+        `That is **not** equivalent to leaving it unset: an explicit value selects a separate store at ` +
         `\`${tilde(path.join(DEFAULT_CONFIG_DIR, '.claude.json'))}\`, while unset uses the legacy ` +
-        `\`~/.claude.json\`. A project set up this way will appear logged out even though your default account works.\n\n` +
-        `Either remove the override, or point it at a dedicated dir such as \`~/.claude-work\` and log in there.`
+        `\`~/.claude.json\`. A project set up this way appears logged out even though the default account works.\n\n` +
+        `Either remove the override, or point it at a dedicated dir such as \`~/.claude-work\`.`
     );
     return item;
   }
 
-  private apiKeyItems(state: WindowState): AccountItem[] {
-    const items: AccountItem[] = [];
-
-    // The CLI telling us a key is in use is stronger evidence than us finding
-    // the variable somewhere, so lead with it.
-    const source = primaryConsumer(state).snapshot.cli?.apiKeySource;
-    if (source) {
-      const item = new AccountItem(`API key in use: ${source}`);
-      item.description = 'supersedes the login';
-      item.iconPath = icon('warning', 'charts.yellow');
-      item.tooltip = new vscode.MarkdownString(
-        `\`claude auth status\` reports it is using an API key from \`${source}\`. Requests are billed to that key, not to the account shown above.`
-      );
-      items.push(item);
-    }
-
-    for (const name of state.processApiKeyVars) {
-      const item = new AccountItem(`${name} is set`);
-      item.description = "this window's environment";
-      item.iconPath = icon('warning', 'charts.yellow');
-      item.tooltip = new vscode.MarkdownString(
-        `\`${name}\` is present in this window's environment. Claude Code prefers it over any logged-in account.`
-      );
-      items.push(item);
-    }
-
-    for (const entry of state.settingsApiKeys) {
-      const item = new AccountItem(`${entry.variable} in settings`);
-      item.description = tilde(entry.file);
-      item.iconPath = icon('warning', 'charts.yellow');
-      item.tooltip = new vscode.MarkdownString(
-        `\`${entry.variable}\` is declared in \`${tilde(entry.file)}\`. An API key takes precedence over a logged-in account.`
-      );
-      item.filePath = entry.file;
-      item.command = { command: 'claudeAccount.openFile', title: 'Open', arguments: [item] };
-      items.push(item);
-    }
-
-    return items;
-  }
-
   private consumersItem(state: WindowState): AccountItem {
-    const item = new AccountItem('Who uses what', vscode.TreeItemCollapsibleState.Expanded);
-    item.iconPath = icon('list-tree');
+    const keys = new Set(
+      realConsumers(state).map(c => `${storeKey(c.snapshot)}|${effectiveEmail(c.snapshot) ?? ''}`)
+    );
+    const agree = keys.size <= 1;
+
+    const item = new AccountItem(
+      'consumers',
+      'Who uses what',
+      agree ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded
+    );
+    item.description = agree ? 'terminal and sidebar agree' : 'terminal and sidebar disagree';
+    item.iconPath = agree ? icon('list-tree') : icon('warning', 'problemsWarningIcon.foreground');
+    if (!agree) {
+      item.tooltip = new vscode.MarkdownString(
+        'The terminal and the Claude Code sidebar resolve different credential stores, so they can be signed in as different accounts in this same window.'
+      );
+    }
+
+    const primaryEmail = effectiveEmail(primaryConsumer(state).snapshot);
     item.children = state.consumers.map(consumer => {
-      const child = new AccountItem(consumer.name);
       const email = effectiveEmail(consumer.snapshot);
-      child.description = `${email ?? 'not logged in'} · ${tilde(consumer.snapshot.configDir)}`;
+      const child = new AccountItem(`consumer:${consumer.kind}`, consumer.name);
+      // Show only the fact that distinguishes this row; the email is the hero.
+      child.description =
+        email === primaryEmail
+          ? storeLabel(consumer.snapshot)
+          : `${email ?? 'not logged in'} · ${storeLabel(consumer.snapshot)}`;
       child.iconPath = consumer.diagnosticOnly
         ? icon('info')
-        : consumer.machineScoped
-          ? icon('warning', 'charts.yellow')
+        : verdictFor(consumer.snapshot, state.expectedAccount) === 'wrong'
+          ? icon('warning', 'problemsWarningIcon.foreground')
           : email
-            ? icon('pass', 'charts.green')
+            ? icon('pass', 'testing.iconPassed')
             : icon('circle-outline');
 
       const tooltip = accountTooltip(consumer.snapshot, consumer.name);
@@ -435,34 +499,36 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     if (!root) {
       return undefined;
     }
-
     const audits = auditProjects(root);
     if (audits.length === 0) {
       return undefined;
     }
 
     const shared = audits.filter(a => a.sharesWith.length > 0);
-    const item = new AccountItem('Projects with a config dir', vscode.TreeItemCollapsibleState.Collapsed);
+    const item = new AccountItem('projects', 'Projects', vscode.TreeItemCollapsibleState.Collapsed);
     item.description =
-      shared.length > 0 ? `${audits.length} · ${shared.length} not isolated` : `${audits.length} · isolated`;
-    item.iconPath = shared.length > 0 ? icon('warning', 'charts.yellow') : icon('checklist');
+      shared.length > 0
+        ? `${audits.length} projects, ${shared.length} sharing a login`
+        : `${audits.length} projects, each isolated`;
+    item.iconPath =
+      shared.length > 0 ? icon('warning', 'problemsWarningIcon.foreground') : icon('checklist');
     item.tooltip = new vscode.MarkdownString(
-      `Scanned \`${tilde(root)}\` for projects declaring \`${CONFIG_DIR_VAR}\` in \`.vscode/settings.json\`.\n\n` +
-        `Accounts here are read from disk, not verified with the CLI — that would mean one subprocess per project.`
+      `Projects under \`${tilde(root)}\` that declare their own \`${CONFIG_DIR_VAR}\`.\n\n` +
+        'Accounts here are read from disk, not verified with the CLI — that would mean one subprocess per project.'
     );
     item.children = audits.map(audit => this.projectChild(audit, state.workspaceRoot));
     return item;
   }
 
   private projectChild(audit: ProjectAudit, currentRoot: string | undefined): AccountItem {
-    const child = new AccountItem(audit.name);
+    const child = new AccountItem(`project:${audit.root}`, audit.name);
     const email = audit.snapshot.account?.email;
     child.description = `${email ?? 'not logged in'} · ${tilde(audit.snapshot.configDir)}`;
 
     const isCurrent = currentRoot !== undefined && path.resolve(currentRoot) === path.resolve(audit.root);
     child.iconPath =
       audit.sharesWith.length > 0
-        ? icon('warning', 'charts.yellow')
+        ? icon('warning', 'problemsWarningIcon.foreground')
         : isCurrent
           ? icon('circle-filled', 'charts.blue')
           : icon('folder');
@@ -470,55 +536,77 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     const tooltip = accountTooltip(audit.snapshot, audit.name);
     if (audit.sharesWith.length > 0) {
       tooltip.appendMarkdown(
-        `\n\n**Shares this config dir with:** ${audit.sharesWith.join(', ')} — these projects are one login, not separate ones.`
+        `\n\n**Shares this store with:** ${audit.sharesWith.join(', ')} — these projects are one login, not separate ones.`
       );
     }
     if (isCurrent) {
       tooltip.appendMarkdown('\n\n_This is the current workspace._');
     }
     child.tooltip = tooltip;
-    child.contextValue = 'copyable';
+    child.contextValue = 'copyable openable';
     child.copyValue = audit.snapshot.configDir;
     child.filePath = path.join(audit.root, '.vscode', 'settings.json');
     return child;
   }
 
   /**
-   * Watch every file a snapshot depends on. Re-created on each refresh because
-   * the set of watched paths changes when the config dir changes.
+   * Watch every file a snapshot depends on. Recreated only when the target set
+   * actually changes, so an ordinary refresh does not tear down and rebuild
+   * every watcher — which can drop events in the gap.
    */
-  private rewatch(): void {
-    this.disposeWatchers();
+  private restartWatchers(state?: WindowState): void {
+    const folder = currentFolderPath();
+    const source = state ?? this.state;
 
-    const state = readWindowState(workspaceRoot(), expectedAccount());
     const paths = new Set<string>();
-    for (const consumer of state.consumers) {
-      for (const target of watchTargets(consumer.snapshot.configDir)) {
-        paths.add(target);
+    if (source) {
+      for (const consumer of source.consumers) {
+        for (const target of watchTargets(
+          consumer.snapshot.configDir,
+          isExplicitDir(consumer.snapshot.source)
+        )) {
+          paths.add(target);
+        }
       }
     }
-    if (state.workspaceRoot) {
-      paths.add(path.join(state.workspaceRoot, '.vscode', 'settings.json'));
+    if (folder) {
+      paths.add(path.join(folder, '.vscode', 'settings.json'));
     }
 
+    const signature = [...paths].sort().join('\n');
+    if (signature === this.watched && this.watchers.length > 0) {
+      return;
+    }
+    this.watched = signature;
+
+    this.disposeWatchers();
     for (const target of paths) {
       try {
         const watcher = vscode.workspace.createFileSystemWatcher(
           new vscode.RelativePattern(vscode.Uri.file(path.dirname(target)), path.basename(target))
         );
-        watcher.onDidChange(() => this._onDidChangeTreeData.fire());
-        watcher.onDidCreate(() => this.refresh());
-        watcher.onDidDelete(() => this.refresh());
-        this.watchers.push(watcher);
+        this.watchers.push(
+          watcher,
+          watcher.onDidChange(() => this.scheduleLoad()),
+          watcher.onDidCreate(() => this.scheduleLoad()),
+          watcher.onDidDelete(() => this.scheduleLoad())
+        );
       } catch {
-        // A non-existent parent directory cannot be watched; refresh() picks it
-        // up once the dir appears.
+        // A non-existent parent directory cannot be watched; the next load picks
+        // it up once the directory appears.
       }
     }
+  }
 
+  restartPolling(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
     const seconds = config().get<number>('refreshInterval', 0);
-    if (seconds && seconds > 0) {
-      this.timer = setInterval(() => this._onDidChangeTreeData.fire(), seconds * 1000);
+    if (seconds > 0) {
+      // Clamped: a fractional value would otherwise spawn many CLI calls a second.
+      this.timer = setInterval(() => void this.load(), Math.max(seconds, 5) * 1000);
     }
   }
 
@@ -527,18 +615,17 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
       watcher.dispose();
     }
     this.watchers = [];
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-    }
   }
 
   dispose(): void {
     this.disposeWatchers();
+    if (this.timer) {
+      clearInterval(this.timer);
+    }
+    if (this.debounce) {
+      clearTimeout(this.debounce);
+    }
     this._onDidChangeTreeData.dispose();
     this._onDidLoad.dispose();
   }
 }
-
-/** Exported for the details report. */
-export { judge };

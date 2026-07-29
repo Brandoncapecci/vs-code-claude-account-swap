@@ -1,9 +1,9 @@
 {
   "name": "claude-account",
   "displayName": "Claude Account",
-  "description": "Shows the live (uncached) Claude Code account for this window, and audits per-project login isolation",
+  "description": "Pin a Claude Code account per project and see, live, whether you are on the right one",
   "publisher": "Brandoncapecci",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -11,6 +11,17 @@
   "categories": [
     "Other"
   ],
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Runs the claude CLI to verify which account is in use. The path to that executable is machine-scoped so a workspace cannot redirect it.",
+      "restrictedConfigurations": [
+        "claudeAccount.claudePath",
+        "claudeAccount.projectsRoot"
+      ]
+    }
+  },
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -23,42 +34,53 @@
           "type": "string",
           "default": "",
           "scope": "resource",
-          "markdownDescription": "The account this project should use, e.g. `you@work.com` or a wildcard like `*@work.com`. When set, the view states plainly whether the live account is **correct** or **wrong**. Set it per project in workspace settings."
+          "order": 1,
+          "markdownDescription": "The account this folder should use, e.g. `you@work.com` or a wildcard like `*@work.com`. When set, the view states plainly whether the live account is **correct** or **wrong**.\n\nUse **Claude Account: Use a Specific Account For This Project** to set this and the matching `CLAUDE_CONFIG_DIR` together."
         },
         "claudeAccount.verifyWithCli": {
           "type": "boolean",
           "default": true,
-          "description": "Verify the account by running `claude auth status --json` for each config dir. This is the authoritative check. Disable to read only from disk."
-        },
-        "claudeAccount.claudePath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to the claude executable. Empty means auto-detect (~/.local/bin, ~/.claude/local, Homebrew, /usr/local/bin, then PATH)."
+          "order": 2,
+          "markdownDescription": "Verify the account by running `claude auth status --json` for each credential store. This is the authoritative check; disable it to read only from disk."
         },
         "claudeAccount.alertOnWrongAccount": {
           "type": "boolean",
           "default": true,
-          "description": "Show an error notification when the live account does not match claudeAccount.expectedAccount."
-        },
-        "claudeAccount.scanProjects": {
-          "type": "boolean",
-          "default": true,
-          "description": "Scan sibling project folders for CLAUDE_CONFIG_DIR overrides to audit login isolation."
-        },
-        "claudeAccount.projectsRoot": {
-          "type": "string",
-          "default": "",
-          "description": "Folder containing your projects. Empty means the parent folder of the current workspace."
-        },
-        "claudeAccount.refreshInterval": {
-          "type": "number",
-          "default": 0,
-          "description": "Seconds between automatic re-reads. 0 disables polling (files are still watched and re-read on window focus)."
+          "order": 3,
+          "markdownDescription": "Show a notification when the live account does not match `#claudeAccount.expectedAccount#`."
         },
         "claudeAccount.statusBar": {
           "type": "boolean",
           "default": true,
+          "order": 4,
           "description": "Show the current account in the status bar."
+        },
+        "claudeAccount.scanProjects": {
+          "type": "boolean",
+          "default": true,
+          "order": 5,
+          "markdownDescription": "Scan sibling folders for `CLAUDE_CONFIG_DIR` overrides, to spot projects that unintentionally share one login."
+        },
+        "claudeAccount.projectsRoot": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "order": 6,
+          "description": "Folder containing your projects. Empty means the parent folder of the current workspace."
+        },
+        "claudeAccount.refreshInterval": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "order": 7,
+          "description": "Seconds between automatic re-reads. 0 disables polling; files are still watched and re-read on window focus. Values below 5 are clamped."
+        },
+        "claudeAccount.claudePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "order": 8,
+          "markdownDescription": "Absolute path to the `claude` executable. Empty auto-detects. Machine-scoped: a workspace cannot redirect which binary is executed."
         }
       }
     },
@@ -72,40 +94,57 @@
     },
     "commands": [
       {
+        "command": "claudeAccount.useAccountForThisProject",
+        "title": "Use a Specific Account For This Project",
+        "category": "Claude Account",
+        "icon": "$(key)"
+      },
+      {
+        "command": "claudeAccount.setExpectedAccount",
+        "title": "Pin Expected Account",
+        "category": "Claude Account",
+        "icon": "$(pin)"
+      },
+      {
         "command": "claudeAccount.refresh",
-        "title": "Claude Account: Re-read Now",
+        "title": "Re-read Now",
+        "category": "Claude Account",
         "icon": "$(refresh)"
       },
       {
         "command": "claudeAccount.showDetails",
-        "title": "Claude Account: Show Details"
-      },
-      {
-        "command": "claudeAccount.copyValue",
-        "title": "Claude Account: Copy Value"
-      },
-      {
-        "command": "claudeAccount.openFile",
-        "title": "Claude Account: Open Source File"
+        "title": "Show Details",
+        "category": "Claude Account"
       },
       {
         "command": "claudeAccount.login",
-        "title": "Claude Account: Log In For This Config Dir"
+        "title": "Log In…",
+        "category": "Claude Account",
+        "icon": "$(sign-in)"
       },
       {
         "command": "claudeAccount.logout",
-        "title": "Claude Account: Log Out Of This Config Dir"
+        "title": "Log Out…",
+        "category": "Claude Account",
+        "icon": "$(sign-out)"
       },
       {
-        "command": "claudeAccount.setExpectedAccount",
-        "title": "Claude Account: Set Expected Account For This Project",
-        "icon": "$(check)"
+        "command": "claudeAccount.copyValue",
+        "title": "Copy Value",
+        "category": "Claude Account",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "claudeAccount.openFile",
+        "title": "Open Source File",
+        "category": "Claude Account",
+        "icon": "$(go-to-file)"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "claudeAccount.setExpectedAccount",
+          "command": "claudeAccount.useAccountForThisProject",
           "when": "view == claudeAccountView",
           "group": "navigation@1"
         },
@@ -116,25 +155,52 @@
         },
         {
           "command": "claudeAccount.login",
-          "when": "view == claudeAccountView"
+          "when": "view == claudeAccountView",
+          "group": "1_auth@1"
         },
         {
           "command": "claudeAccount.logout",
-          "when": "view == claudeAccountView"
+          "when": "view == claudeAccountView",
+          "group": "1_auth@2"
+        },
+        {
+          "command": "claudeAccount.setExpectedAccount",
+          "when": "view == claudeAccountView",
+          "group": "2_advanced@1"
+        },
+        {
+          "command": "claudeAccount.showDetails",
+          "when": "view == claudeAccountView",
+          "group": "2_advanced@2"
         }
       ],
       "view/item/context": [
         {
           "command": "claudeAccount.copyValue",
-          "when": "view == claudeAccountView && viewItem =~ /copyable/",
+          "when": "view == claudeAccountView && viewItem =~ /\\bcopyable\\b/",
           "group": "inline"
+        },
+        {
+          "command": "claudeAccount.openFile",
+          "when": "view == claudeAccountView && viewItem =~ /\\bopenable\\b/",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "claudeAccount.copyValue",
+          "when": "false"
+        },
+        {
+          "command": "claudeAccount.openFile",
+          "when": "false"
         }
       ]
     },
     "viewsWelcome": [
       {
         "view": "claudeAccountView",
-        "contents": "Open a workspace folder to see which Claude Code account it uses."
+        "contents": "Open a folder to see and pin the Claude account it uses.\n\n[Open Folder](command:vscode.openFolder)"
       }
     ]
   },
@@ -144,8 +210,11 @@
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
     "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1"
   }
 }
