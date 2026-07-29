@@ -76,14 +76,6 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     this._onDidChangeTreeData.fire();
   }
 
-  /** Latest window state, re-read from disk if this is a fresh render pass. */
-  getState(): WindowState {
-    if (!this.state) {
-      this.state = readWindowState(workspaceRoot());
-    }
-    return this.state;
-  }
-
   getTreeItem(element: AccountItem): vscode.TreeItem {
     return element;
   }
