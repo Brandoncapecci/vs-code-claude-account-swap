@@ -16,16 +16,14 @@ import {
   isVerified,
   primaryConsumer,
   realConsumers,
-  storeKey,
   storeLabel,
   tilde,
-  verdictFor,
   windowVerdict,
   worstConsumer,
   watchTargets,
 } from './accountReader';
 import { config, currentFolderPath, loadWindowState, projectsRoot } from './settings';
-import { verdictCopy } from './verdictCopy';
+import { ERROR, INFO, PASS, WARN, verdictCopy } from './verdictCopy';
 
 export class AccountItem extends vscode.TreeItem {
   children?: AccountItem[];
@@ -247,7 +245,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
   private expectedItem(state: WindowState): AccountItem {
     const item = new AccountItem('expected', 'Expected');
     item.description = state.expectedAccount;
-    item.iconPath = icon('pin', 'charts.blue');
+    item.iconPath = icon('pin', INFO);
     item.tooltip = new vscode.MarkdownString(
       `This project is pinned to \`${state.expectedAccount}\`. Change it with **Pin Expected Account**, or switch which account the project uses with **Use a Specific Account For This Project**.`
     );
@@ -284,7 +282,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     }
     const item = new AccountItem('notIsolated', 'Not isolated');
     item.description = 'shares one login with every other project';
-    item.iconPath = icon('warning', 'problemsWarningIcon.foreground');
+    item.iconPath = icon('warning', WARN);
     item.command = {
       command: 'claudeAccount.useAccountForThisProject',
       title: 'Use a Specific Account For This Project',
@@ -312,7 +310,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
 
     const item = new AccountItem('repoLeak', 'Committed to this repo');
     item.description = 'teammates would get your config dir';
-    item.iconPath = icon('source-control', 'problemsWarningIcon.foreground');
+    item.iconPath = icon('warning', WARN);
     item.tooltip = new vscode.MarkdownString(
       `\`${tilde(state.overrides.file)}\` is tracked by git and declares \`${CONFIG_DIR_VAR}\`, which is a machine-local fact about **your** login — not something your teammates want.\n\n` +
         'Fix it one of these ways:\n\n' +
@@ -328,7 +326,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
   private unreadableItem(file: string, error: string): AccountItem {
     const item = new AccountItem('overridesError', 'Workspace settings unreadable');
     item.description = tilde(file);
-    item.iconPath = icon('error', 'problemsErrorIcon.foreground');
+    item.iconPath = icon('error', ERROR);
     item.tooltip = new vscode.MarkdownString(
       `${error}\n\nThe setup flow refuses to write to this file until it parses.`
     );
@@ -350,7 +348,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     if (apiKeySource) {
       const child = new AccountItem(`apikey:live:${apiKeySource}`, `API key in use: ${apiKeySource}`);
       child.description = 'supersedes the login';
-      child.iconPath = icon('key', 'problemsErrorIcon.foreground');
+      child.iconPath = icon('key', ERROR);
       child.tooltip = new vscode.MarkdownString(
         `\`claude auth status\` reports it is using an API key from \`${apiKeySource}\`. Requests are billed to that key, not to the account shown above.`
       );
@@ -360,7 +358,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     for (const name of state.processApiKeyVars) {
       const child = new AccountItem(`apikey:env:${name}`, `${name} is set`);
       child.description = "this window's environment";
-      child.iconPath = icon('warning', 'problemsWarningIcon.foreground');
+      child.iconPath = icon('warning', WARN);
       child.tooltip = new vscode.MarkdownString(
         `\`${name}\` is present in this window's environment. Claude Code prefers it over any logged-in account.`
       );
@@ -370,7 +368,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     for (const entry of state.settingsApiKeys) {
       const child = new AccountItem(`apikey:file:${entry.variable}:${entry.file}`, `${entry.variable} in settings`);
       child.description = tilde(entry.file);
-      child.iconPath = icon('warning', 'problemsWarningIcon.foreground');
+      child.iconPath = icon('warning', WARN);
       child.tooltip = new vscode.MarkdownString(
         `\`${entry.variable}\` is declared in \`${tilde(entry.file)}\`. An API key takes precedence over a logged-in account.`
       );
@@ -383,7 +381,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     for (const problem of state.settingsProblems) {
       const child = new AccountItem(`problem:${problem.file}`, 'Settings file unreadable');
       child.description = tilde(problem.file);
-      child.iconPath = icon('error', 'problemsErrorIcon.foreground');
+      child.iconPath = icon('error', ERROR);
       child.tooltip = new vscode.MarkdownString(
         `\`${tilde(problem.file)}\` could not be parsed (${problem.error}), so any \`env\` block in it — including an API key — is not being checked.`
       );
@@ -410,7 +408,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
         : vscode.TreeItemCollapsibleState.Expanded
     );
     item.description = `${children.length} in effect`;
-    item.iconPath = icon('warning', 'problemsWarningIcon.foreground');
+    item.iconPath = icon('warning', WARN);
     item.children = children;
     return item;
   }
@@ -432,7 +430,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
 
     const item = new AccountItem('trap', `${CONFIG_DIR_VAR} is set to the default dir`);
     item.description = 'not the same as leaving it unset';
-    item.iconPath = icon('warning', 'problemsWarningIcon.foreground');
+    item.iconPath = icon('warning', WARN);
     item.tooltip = new vscode.MarkdownString(
       `\`${CONFIG_DIR_VAR}\` is explicitly set to \`${tilde(DEFAULT_CONFIG_DIR)}\`.\n\n` +
         `That is **not** equivalent to leaving it unset: an explicit value selects a separate store at ` +
@@ -444,39 +442,54 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
   }
 
   private consumersItem(state: WindowState): AccountItem {
-    const keys = new Set(
-      realConsumers(state).map(c => `${storeKey(c.snapshot)}|${effectiveEmail(c.snapshot) ?? ''}`)
+    const primaryEmail = effectiveEmail(primaryConsumer(state).snapshot);
+    // Agreement is about the *account*, not the directory. Two stores holding
+    // the same login are equivalent in effect and must not raise a warning.
+    const disagreeing = realConsumers(state).filter(
+      c => effectiveEmail(c.snapshot) !== primaryEmail
     );
-    const agree = keys.size <= 1;
+    const agree = disagreeing.length === 0;
 
     const item = new AccountItem(
       'consumers',
       'Who uses what',
       agree ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded
     );
-    item.description = agree ? 'terminal and sidebar agree' : 'terminal and sidebar disagree';
-    item.iconPath = agree ? icon('list-tree') : icon('warning', 'problemsWarningIcon.foreground');
-    if (!agree) {
+
+    if (agree) {
+      item.description = 'terminal and sidebar agree';
+      item.iconPath = icon('check', PASS);
       item.tooltip = new vscode.MarkdownString(
-        'The terminal and the Claude Code sidebar resolve different credential stores, so they can be signed in as different accounts in this same window.'
+        'Every Claude Code surface in this window resolves the same account.'
+      );
+    } else {
+      const names = disagreeing.map(c => c.name.toLowerCase()).join(' and ');
+      item.description = `${names} on a different account`;
+      item.iconPath = icon('warning', WARN);
+      item.tooltip = new vscode.MarkdownString(
+        `The terminal resolves \`${primaryEmail ?? 'no account'}\`, but the ${names} resolves ` +
+          `${disagreeing.map(c => `\`${effectiveEmail(c.snapshot) ?? 'no account'}\``).join(' and ')}. ` +
+          'They can be signed in as different accounts in the same window.'
       );
     }
 
-    const primaryEmail = effectiveEmail(primaryConsumer(state).snapshot);
     item.children = state.consumers.map(consumer => {
       const email = effectiveEmail(consumer.snapshot);
+      const differs = !consumer.diagnosticOnly && email !== primaryEmail;
       const child = new AccountItem(`consumer:${consumer.kind}`, consumer.name);
-      // Show only the fact that distinguishes this row; the email is the hero.
-      child.description =
-        email === primaryEmail
-          ? storeLabel(consumer.snapshot)
-          : `${email ?? 'not logged in'} · ${storeLabel(consumer.snapshot)}`;
+
+      // When something disagrees, every row shows its email so the two can
+      // actually be compared; otherwise the store alone is the useful detail.
+      child.description = agree
+        ? storeLabel(consumer.snapshot)
+        : `${email ?? 'not logged in'} · ${storeLabel(consumer.snapshot)}`;
+
       child.iconPath = consumer.diagnosticOnly
         ? icon('info')
-        : verdictFor(consumer.snapshot, state.expectedAccount) === 'wrong'
-          ? icon('warning', 'problemsWarningIcon.foreground')
+        : differs
+          ? icon('warning', WARN)
           : email
-            ? icon('pass', 'testing.iconPassed')
+            ? icon('pass', PASS)
             : icon('circle-outline');
 
       const tooltip = accountTooltip(consumer.snapshot, consumer.name);
@@ -511,7 +524,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
         ? `${audits.length} projects, ${shared.length} sharing a login`
         : `${audits.length} projects, each isolated`;
     item.iconPath =
-      shared.length > 0 ? icon('warning', 'problemsWarningIcon.foreground') : icon('checklist');
+      shared.length > 0 ? icon('warning', WARN) : icon('checklist');
     item.tooltip = new vscode.MarkdownString(
       `Projects under \`${tilde(root)}\` that declare their own \`${CONFIG_DIR_VAR}\`.\n\n` +
         'Accounts here are read from disk, not verified with the CLI — that would mean one subprocess per project.'
@@ -528,9 +541,9 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     const isCurrent = currentRoot !== undefined && path.resolve(currentRoot) === path.resolve(audit.root);
     child.iconPath =
       audit.sharesWith.length > 0
-        ? icon('warning', 'problemsWarningIcon.foreground')
+        ? icon('warning', WARN)
         : isCurrent
-          ? icon('circle-filled', 'charts.blue')
+          ? icon('circle-filled', INFO)
           : icon('folder');
 
     const tooltip = accountTooltip(audit.snapshot, audit.name);

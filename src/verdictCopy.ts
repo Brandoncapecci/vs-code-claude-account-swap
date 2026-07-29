@@ -38,10 +38,13 @@ export interface VerdictCopy {
   command: string;
 }
 
-const PASS = 'testing.iconPassed';
-const ERROR = 'problemsErrorIcon.foreground';
-const WARN = 'problemsWarningIcon.foreground';
-const INFO = 'charts.blue';
+// The chart palette renders as unambiguous green/red/yellow across themes;
+// the problems-icon tokens can come through near-white in some dark themes,
+// which loses the whole point of colour-coding a warning.
+export const PASS = 'charts.green';
+export const ERROR = 'charts.red';
+export const WARN = 'charts.yellow';
+export const INFO = 'charts.blue';
 
 export function verdictCopy(verdict: Verdict, ctx: VerdictContext): VerdictCopy {
   const copy = base(verdict, ctx);
@@ -137,23 +140,25 @@ function base(verdict: Verdict, ctx: VerdictContext): VerdictCopy {
       };
 
     case 'no-expectation':
+      // The description has to say whose email this is. "No account pinned"
+      // next to a bare address reads as a contradiction.
       return ctx.shared
         ? {
             label: 'No account pinned',
             icon: 'person-add',
             color: INFO,
-            treeDescription: 'shares the default login with every other project',
+            treeDescription: `signed in as ${email} — shared login, click to set up`,
             statusText: email,
-            detail: `Signed in as \`${email}\`, but this project has no account of its own — it shares one credential store with every other unconfigured project. Pick an account to give it its own.`,
+            detail: `Signed in as \`${email}\`, but nothing is pinned for this project and it has no store of its own — it shares one credential store with every other unconfigured project. Pick an account to give it its own.`,
             command: 'claudeAccount.useAccountForThisProject',
           }
         : {
             label: 'No account pinned',
             icon: 'person-add',
             color: INFO,
-            treeDescription: email,
+            treeDescription: `signed in as ${email} — click to pin`,
             statusText: email,
-            detail: `This project has its own store (${ctx.store}) signed in as \`${email}\`, but no expected account is pinned, so nothing is being checked.`,
+            detail: `This project has its own store (${ctx.store}) signed in as \`${email}\`. Nothing is pinned yet, so no check is being made — pin it and the view will tell you whenever the account changes.`,
             command: 'claudeAccount.setExpectedAccount',
           };
   }
