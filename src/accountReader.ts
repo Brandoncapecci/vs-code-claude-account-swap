@@ -1,49 +1,23 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFile } from 'child_process';
 
 /**
- * Everything in this file reads from disk on every call. Nothing is memoised.
- * That is the entire point of the extension: the Claude Code sidebar caches the
- * account it saw when the window started, while API calls read credentials live,
- * so a stale display can disagree with what requests actually use.
+ * Nothing here is memoized. Every call reads from disk, or asks the Claude Code
+ * CLI, right now. That is the point of the extension: the Claude Code sidebar
+ * caches the account it saw when the window started, while API calls read
+ * credentials live, so a stale display can disagree with what requests use.
  */
 
 export const CONFIG_DIR_VAR = 'CLAUDE_CONFIG_DIR';
 export const API_KEY_VARS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
 
-export interface Account {
-  email?: string;
-  organizationName?: string;
-  organizationRole?: string;
-  workspaceRole?: string;
-  accountUuid?: string;
-  organizationUuid?: string;
-}
-
-export type ConfigDirSource =
-  | 'process env'
-  | 'workspace settings (terminal)'
-  | 'workspace settings (sidebar)'
-  | 'default';
-
-export interface AccountSnapshot {
-  /** Resolved absolute config dir. */
-  configDir: string;
-  /** Whether CLAUDE_CONFIG_DIR was explicitly set, and by whom. */
-  source: ConfigDirSource;
-  /** The file the account was actually read from, if any. */
-  accountFile: string | null;
-  account: Account | null;
-  /** True when an oauth account with an email was found on disk. */
-  loggedIn: boolean;
-  /** Path of an on-disk credentials file, if one exists (macOS normally uses the Keychain). */
-  credentialsFile: string | null;
-  error?: string;
-  readAt: Date;
-}
-
 export const DEFAULT_CONFIG_DIR = path.join(os.homedir(), '.claude');
+
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
 
 export function expandHome(value: string): string {
   let out = value.trim();
@@ -61,17 +35,160 @@ export function tilde(value: string): string {
 }
 
 /**
- * Candidate locations of the account file for a config dir.
+ * Candidate locations of the account file.
  *
- * With CLAUDE_CONFIG_DIR set, Claude Code keeps `.claude.json` inside that dir.
- * With it unset, the account lives at `~/.claude.json` alongside the `~/.claude` dir.
+ * Leaving CLAUDE_CONFIG_DIR unset is NOT the same as setting it to `~/.claude`:
+ * unset uses the legacy `~/.claude.json` and a Keychain entry keyed for the
+ * default, while an explicit value — even the default path — selects a separate
+ * store at `<dir>/.claude.json`. Verified against `claude auth status`, which
+ * reports a logged-in account with the var unset and none with it set to
+ * `~/.claude`. So the legacy path is only a candidate when nothing is set.
  */
-function accountFileCandidates(configDir: string): string[] {
+function accountFileCandidates(configDir: string, explicit: boolean): string[] {
   const candidates = [path.join(configDir, '.claude.json')];
-  if (path.resolve(configDir) === DEFAULT_CONFIG_DIR) {
+  if (!explicit) {
     candidates.push(path.join(os.homedir(), '.claude.json'));
   }
   return candidates;
+}
+
+/** True when CLAUDE_CONFIG_DIR was actually set, rather than us falling back. */
+export function isExplicitDir(source: ConfigDirSource): boolean {
+  return source !== 'default';
+}
+
+/** Files whose contents feed a snapshot — watch these to know when to re-read. */
+export function watchTargets(configDir: string): string[] {
+  return [
+    ...accountFileCandidates(configDir, false),
+    path.join(configDir, '.credentials.json'),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Live verification via the Claude Code CLI
+// ---------------------------------------------------------------------------
+
+/** Shape of `claude auth status --json`. */
+export interface CliStatus {
+  loggedIn: boolean;
+  authMethod?: string;
+  apiProvider?: string;
+  /** Present when an API key env var supersedes the OAuth login. */
+  apiKeySource?: string;
+  email?: string;
+  orgId?: string;
+  orgName?: string;
+  subscriptionType?: string;
+}
+
+const CLI_CANDIDATES = [
+  path.join(os.homedir(), '.local', 'bin', 'claude'),
+  path.join(os.homedir(), '.claude', 'local', 'claude'),
+  '/opt/homebrew/bin/claude',
+  '/usr/local/bin/claude',
+];
+
+/**
+ * An extension host does not get the user's shell PATH, so `claude` by name
+ * often fails to resolve. Prefer a known absolute install path, and fall back to
+ * PATH resolution.
+ */
+export function resolveClaudePath(configured?: string): string {
+  if (configured && configured.trim()) {
+    const explicit = expandHome(configured);
+    if (fs.existsSync(explicit)) {
+      return explicit;
+    }
+  }
+  return CLI_CANDIDATES.find(candidate => fs.existsSync(candidate)) ?? 'claude';
+}
+
+export interface CliResult {
+  status?: CliStatus;
+  error?: string;
+}
+
+/**
+ * Ask the CLI who it is for a given config dir. This is the authoritative
+ * answer: it is the same code path a real `claude` run uses, so it reflects the
+ * live Keychain rather than derived on-disk state.
+ */
+export function verifyWithCli(
+  claudePath: string,
+  configDir: string | undefined,
+  env: Record<string, string>,
+  cwd?: string
+): Promise<CliResult> {
+  // configDir === undefined means "nothing was set", which is a distinct store
+  // from any explicit path. The var must be absent, not set to the default.
+  const childEnv: Record<string, string | undefined> = { ...process.env, ...env };
+  if (configDir === undefined) {
+    delete childEnv[CONFIG_DIR_VAR];
+  } else {
+    childEnv[CONFIG_DIR_VAR] = configDir;
+  }
+
+  return new Promise(resolve => {
+    execFile(
+      claudePath,
+      ['auth', 'status', '--json'],
+      {
+        env: childEnv,
+        cwd: cwd && fs.existsSync(cwd) ? cwd : os.homedir(),
+        timeout: 20000,
+        maxBuffer: 1024 * 1024,
+      },
+      (err, stdout, stderr) => {
+        const text = (stdout ?? '').trim();
+        if (text) {
+          try {
+            resolve({ status: JSON.parse(text) as CliStatus });
+            return;
+          } catch {
+            // Fall through to the error path below.
+          }
+        }
+        const detail = (stderr ?? '').trim() || err?.message || 'no output';
+        resolve({ error: `\`claude auth status\` failed: ${detail}` });
+      }
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// On-disk account (fallback when the CLI is unavailable)
+// ---------------------------------------------------------------------------
+
+export interface Account {
+  email?: string;
+  organizationName?: string;
+  organizationRole?: string;
+  workspaceRole?: string;
+  accountUuid?: string;
+  organizationUuid?: string;
+}
+
+export type ConfigDirSource =
+  | 'process env'
+  | 'workspace settings (terminal)'
+  | 'workspace settings (sidebar)'
+  | 'default';
+
+export interface AccountSnapshot {
+  configDir: string;
+  source: ConfigDirSource;
+  /** The file the on-disk account was read from, if any. */
+  accountFile: string | null;
+  /** Account as recorded on disk at login time. */
+  account: Account | null;
+  /** Path of an on-disk credentials file (macOS normally uses the Keychain). */
+  credentialsFile: string | null;
+  error?: string;
+  readAt: Date;
+  /** Live CLI answer. Absent until verification runs or if it failed. */
+  cli?: CliStatus;
+  cliError?: string;
 }
 
 export function readAccount(configDir: string, source: ConfigDirSource): AccountSnapshot {
@@ -80,12 +197,15 @@ export function readAccount(configDir: string, source: ConfigDirSource): Account
     source,
     accountFile: null,
     account: null,
-    loggedIn: false,
     credentialsFile: null,
     readAt: new Date(),
   };
 
-  for (const candidate of accountFileCandidates(configDir)) {
+  // Keep looking until a candidate actually yields an account. A config dir can
+  // hold a `.claude.json` containing only first-run bookkeeping and no
+  // `oauthAccount`; stopping at the first readable file would then mask a real
+  // account in a later candidate.
+  for (const candidate of accountFileCandidates(configDir, isExplicitDir(source))) {
     let raw: string;
     try {
       raw = fs.readFileSync(candidate, 'utf-8');
@@ -93,11 +213,10 @@ export function readAccount(configDir: string, source: ConfigDirSource): Account
       continue;
     }
 
-    snapshot.accountFile = candidate;
+    snapshot.accountFile ??= candidate;
     try {
-      const parsed = JSON.parse(raw);
-      const oauth = parsed?.oauthAccount;
-      if (oauth && typeof oauth === 'object') {
+      const oauth = JSON.parse(raw)?.oauthAccount;
+      if (oauth && typeof oauth === 'object' && oauth.emailAddress) {
         snapshot.account = {
           email: oauth.emailAddress,
           organizationName: oauth.organizationName,
@@ -106,12 +225,12 @@ export function readAccount(configDir: string, source: ConfigDirSource): Account
           accountUuid: oauth.accountUuid,
           organizationUuid: oauth.organizationUuid,
         };
-        snapshot.loggedIn = typeof oauth.emailAddress === 'string' && oauth.emailAddress.length > 0;
+        snapshot.accountFile = candidate;
+        break;
       }
     } catch (err) {
       snapshot.error = `Could not parse ${tilde(candidate)}: ${(err as Error).message}`;
     }
-    break;
   }
 
   const credentials = path.join(configDir, '.credentials.json');
@@ -122,9 +241,66 @@ export function readAccount(configDir: string, source: ConfigDirSource): Account
   return snapshot;
 }
 
-/** Files whose contents feed a snapshot — watch these to know when to re-read. */
-export function watchTargets(configDir: string): string[] {
-  return [...accountFileCandidates(configDir), path.join(configDir, '.credentials.json')];
+/** True when the live CLI answered — i.e. this is not a guess from disk. */
+export function isVerified(snapshot: AccountSnapshot): boolean {
+  return snapshot.cli !== undefined;
+}
+
+/** The account in effect, preferring the live CLI answer over on-disk state. */
+export function effectiveEmail(snapshot: AccountSnapshot): string | undefined {
+  return snapshot.cli ? snapshot.cli.email : snapshot.account?.email;
+}
+
+export function effectiveOrg(snapshot: AccountSnapshot): string | undefined {
+  return snapshot.cli ? snapshot.cli.orgName : snapshot.account?.organizationName;
+}
+
+export function isLoggedIn(snapshot: AccountSnapshot): boolean {
+  if (snapshot.cli) {
+    return snapshot.cli.loggedIn && !!snapshot.cli.email;
+  }
+  return !!snapshot.account?.email;
+}
+
+// ---------------------------------------------------------------------------
+// Expected-account assertion
+// ---------------------------------------------------------------------------
+
+export type Verdict = 'correct' | 'wrong' | 'not-logged-in' | 'no-expectation' | 'unverified';
+
+/**
+ * Compare the account in effect against what the user declared for this
+ * project. `expected` accepts an exact email or a `*@domain` wildcard.
+ */
+export function matchesExpected(email: string | undefined, expected: string): boolean {
+  if (!email) {
+    return false;
+  }
+  const actual = email.trim().toLowerCase();
+  const want = expected.trim().toLowerCase();
+  if (!want) {
+    return false;
+  }
+  if (want.includes('*')) {
+    const pattern = new RegExp(
+      `^${want.split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`
+    );
+    return pattern.test(actual);
+  }
+  return actual === want;
+}
+
+export function judge(snapshot: AccountSnapshot, expected: string | undefined): Verdict {
+  if (!isLoggedIn(snapshot)) {
+    return 'not-logged-in';
+  }
+  if (!expected || !expected.trim()) {
+    return 'no-expectation';
+  }
+  if (!isVerified(snapshot)) {
+    return 'unverified';
+  }
+  return matchesExpected(effectiveEmail(snapshot), expected) ? 'correct' : 'wrong';
 }
 
 // ---------------------------------------------------------------------------
@@ -140,10 +316,10 @@ export function watchTargets(configDir: string): string[] {
  */
 export interface WorkspaceEnvOverrides {
   file: string | null;
-  terminalConfigDir?: string;
-  sidebarConfigDir?: string;
-  terminalApiKeyVar?: string;
-  sidebarApiKeyVar?: string;
+  /** Normalized `terminal.integrated.env.<platform>` block. */
+  terminalEnv: Record<string, string>;
+  /** Normalized `claudeCode.environmentVariables` block. */
+  sidebarEnv: Record<string, string>;
   error?: string;
 }
 
@@ -232,8 +408,7 @@ export function removeTrailingCommas(text: string): string {
       continue;
     }
     if (c === ',') {
-      const rest = text.slice(i + 1);
-      const nextChar = rest.replace(/^\s*/, '')[0];
+      const nextChar = text.slice(i + 1).replace(/^\s*/, '')[0];
       if (nextChar === '}' || nextChar === ']') {
         continue;
       }
@@ -274,36 +449,41 @@ export function deepGet(obj: unknown, segments: string[]): unknown {
 }
 
 /**
- * Read one variable out of an environment block.
+ * Normalize an environment block to a plain map.
  *
  * The two blocks we care about are shaped differently:
- * `terminal.integrated.env.osx` is a `{ NAME: value }` map, while
+ * `terminal.integrated.env.<platform>` is a `{ NAME: value }` map, while
  * `claudeCode.environmentVariables` is an array of `{ name, value }` (confirmed
- * against the Claude Code extension manifest). Both shapes are accepted here so
- * a hand-edited settings.json in either form is still understood.
+ * against the Claude Code extension manifest, where it is also machine-scoped).
+ * Both shapes are accepted so a hand-edited settings.json is still understood.
  */
-function envVar(block: unknown, name: string): string | undefined {
-  let value: unknown;
+export function normalizeEnvBlock(block: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
 
   if (Array.isArray(block)) {
-    const entry = block.find(
-      item => item && typeof item === 'object' && (item as Record<string, unknown>).name === name
-    );
-    value = entry ? (entry as Record<string, unknown>).value : undefined;
+    for (const item of block) {
+      if (item && typeof item === 'object') {
+        const { name, value } = item as Record<string, unknown>;
+        if (typeof name === 'string' && typeof value === 'string') {
+          out[name] = value;
+        }
+      }
+    }
   } else if (block && typeof block === 'object') {
-    value = (block as Record<string, unknown>)[name];
+    for (const [name, value] of Object.entries(block as Record<string, unknown>)) {
+      if (typeof value === 'string') {
+        out[name] = value;
+      }
+    }
   }
 
-  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
-}
-
-function firstApiKeyVar(block: unknown): string | undefined {
-  return API_KEY_VARS.find(name => envVar(block, name) !== undefined);
+  return out;
 }
 
 export function readWorkspaceEnvOverrides(workspaceRoot: string | undefined): WorkspaceEnvOverrides {
+  const empty: WorkspaceEnvOverrides = { file: null, terminalEnv: {}, sidebarEnv: {} };
   if (!workspaceRoot) {
-    return { file: null };
+    return empty;
   }
 
   const file = path.join(workspaceRoot, '.vscode', 'settings.json');
@@ -311,25 +491,24 @@ export function readWorkspaceEnvOverrides(workspaceRoot: string | undefined): Wo
   try {
     raw = fs.readFileSync(file, 'utf-8');
   } catch {
-    return { file: null };
+    return empty;
   }
 
   let parsed: unknown;
   try {
     parsed = parseJsonc(raw);
   } catch (err) {
-    return { file, error: `Could not parse ${tilde(file)}: ${(err as Error).message}` };
+    return {
+      ...empty,
+      file,
+      error: `Could not parse ${tilde(file)}: ${(err as Error).message}`,
+    };
   }
-
-  const terminalBlock = deepGet(parsed, ['terminal', 'integrated', 'env', PLATFORM_KEY]);
-  const sidebarBlock = deepGet(parsed, ['claudeCode', 'environmentVariables']);
 
   return {
     file,
-    terminalConfigDir: envVar(terminalBlock, CONFIG_DIR_VAR),
-    sidebarConfigDir: envVar(sidebarBlock, CONFIG_DIR_VAR),
-    terminalApiKeyVar: firstApiKeyVar(terminalBlock),
-    sidebarApiKeyVar: firstApiKeyVar(sidebarBlock),
+    terminalEnv: normalizeEnvBlock(deepGet(parsed, ['terminal', 'integrated', 'env', PLATFORM_KEY])),
+    sidebarEnv: normalizeEnvBlock(deepGet(parsed, ['claudeCode', 'environmentVariables'])),
   };
 }
 
@@ -356,12 +535,13 @@ export function apiKeyVarsInSettingsFiles(
       continue;
     }
     try {
-      const variable = firstApiKeyVar(deepGet(parseJsonc(raw), ['env']));
+      const env = normalizeEnvBlock(deepGet(parseJsonc(raw), ['env']));
+      const variable = API_KEY_VARS.find(name => env[name]);
       if (variable) {
         found.push({ file, variable });
       }
     } catch {
-      // A malformed settings file is reported elsewhere; skip it here.
+      // A malformed settings file is surfaced elsewhere; skip it here.
     }
   }
   return found;
@@ -375,6 +555,8 @@ export interface ResolvedConsumer {
   /** Display name of the thing that would use this account. */
   name: string;
   snapshot: AccountSnapshot;
+  /** Env applied on top of the process env when this consumer runs Claude. */
+  env: Record<string, string>;
   /** Set when the value is declared but VS Code may not honour it. */
   caveat?: string;
   /**
@@ -400,62 +582,72 @@ export interface WindowState {
   processApiKeyVars: string[];
   /** API keys declared in settings files, which also override any login. */
   settingsApiKeys: { file: string; variable: string }[];
+  /** The account this project is supposed to use, if declared. */
+  expectedAccount?: string;
 }
 
 function resolve(explicit: string | undefined, source: ConfigDirSource): AccountSnapshot {
-  if (explicit) {
-    return readAccount(expandHome(explicit), source);
-  }
-  return readAccount(DEFAULT_CONFIG_DIR, 'default');
+  return explicit
+    ? readAccount(expandHome(explicit), source)
+    : readAccount(DEFAULT_CONFIG_DIR, 'default');
 }
 
-export function readWindowState(workspaceRoot: string | undefined): WindowState {
+export function readWindowState(
+  workspaceRoot: string | undefined,
+  expectedAccount?: string
+): WindowState {
   const overrides = readWorkspaceEnvOverrides(workspaceRoot);
   const processConfigDir = process.env[CONFIG_DIR_VAR]?.trim() || undefined;
 
+  const terminalDir = overrides.terminalEnv[CONFIG_DIR_VAR];
+  const sidebarDir = overrides.sidebarEnv[CONFIG_DIR_VAR];
+
   const processSnapshot = resolve(processConfigDir, 'process env');
-
-  const terminalSnapshot = overrides.terminalConfigDir
-    ? resolve(overrides.terminalConfigDir, 'workspace settings (terminal)')
-    : processSnapshot;
-
-  const sidebarSnapshot = overrides.sidebarConfigDir
-    ? resolve(overrides.sidebarConfigDir, 'workspace settings (sidebar)')
-    : processSnapshot;
+  const terminalSnapshot = terminalDir
+    ? resolve(terminalDir, 'workspace settings (terminal)')
+    : resolve(processConfigDir, 'process env');
+  const sidebarSnapshot = sidebarDir
+    ? resolve(sidebarDir, 'workspace settings (sidebar)')
+    : resolve(processConfigDir, 'process env');
 
   const consumers: ResolvedConsumer[] = [
     {
       name: 'Integrated terminal',
       snapshot: terminalSnapshot,
-      caveat: overrides.terminalConfigDir
+      env: overrides.terminalEnv,
+      caveat: terminalDir
         ? undefined
         : 'No terminal.integrated.env override — inherits the process environment.',
     },
     {
       name: 'Claude Code sidebar',
       snapshot: sidebarSnapshot,
-      machineScoped: overrides.sidebarConfigDir !== undefined,
-      caveat: overrides.sidebarConfigDir
-        ? 'claudeCode.environmentVariables is machine-scoped, so a workspace-level value may be ignored. Trust /status in the sidebar over this row.'
+      env: overrides.sidebarEnv,
+      machineScoped: sidebarDir !== undefined,
+      caveat: sidebarDir
+        ? 'claudeCode.environmentVariables is machine-scoped, so a workspace-level value may be ignored. If the sidebar disagrees after a window reload, that is what happened.'
         : 'No claudeCode.environmentVariables override — inherits the process environment.',
     },
     {
       name: 'This extension host',
       snapshot: processSnapshot,
+      env: {},
       diagnosticOnly: true,
       caveat:
         'Shown for context only. An extension host does not inherit terminal.integrated.env, so this row differing from the others is normal.',
     },
   ];
 
-  const apiKeysFromSettings = [
+  const settingsApiKeys = [
     ...apiKeyVarsInSettingsFiles(workspaceRoot, terminalSnapshot.configDir),
-    ...(overrides.terminalApiKeyVar && overrides.file
-      ? [{ file: overrides.file, variable: overrides.terminalApiKeyVar }]
-      : []),
-    ...(overrides.sidebarApiKeyVar && overrides.file
-      ? [{ file: overrides.file, variable: overrides.sidebarApiKeyVar }]
-      : []),
+    ...API_KEY_VARS.filter(name => overrides.terminalEnv[name]).map(variable => ({
+      file: overrides.file!,
+      variable,
+    })),
+    ...API_KEY_VARS.filter(name => overrides.sidebarEnv[name]).map(variable => ({
+      file: overrides.file!,
+      variable,
+    })),
   ];
 
   return {
@@ -464,8 +656,36 @@ export function readWindowState(workspaceRoot: string | undefined): WindowState 
     processConfigDir,
     consumers,
     processApiKeyVars: API_KEY_VARS.filter(name => (process.env[name] ?? '') !== ''),
-    settingsApiKeys: apiKeysFromSettings,
+    settingsApiKeys,
+    expectedAccount,
   };
+}
+
+/** Attach live CLI answers to every consumer, one call per distinct config dir. */
+export async function verifyWindowState(state: WindowState, claudePath: string): Promise<void> {
+  const byKey = new Map<string, ResolvedConsumer[]>();
+  for (const consumer of state.consumers) {
+    const explicit = isExplicitDir(consumer.snapshot.source);
+    const key = JSON.stringify([explicit ? consumer.snapshot.configDir : null, consumer.env]);
+    const group = byKey.get(key);
+    group ? group.push(consumer) : byKey.set(key, [consumer]);
+  }
+
+  await Promise.all(
+    [...byKey.values()].map(async group => {
+      const { snapshot, env } = group[0];
+      const result = await verifyWithCli(
+        claudePath,
+        isExplicitDir(snapshot.source) ? snapshot.configDir : undefined,
+        env,
+        state.workspaceRoot
+      );
+      for (const consumer of group) {
+        consumer.snapshot.cli = result.status;
+        consumer.snapshot.cliError = result.error;
+      }
+    })
+  );
 }
 
 /** The account a `claude` run in the integrated terminal would use. */
@@ -485,6 +705,10 @@ export function hasConsumerMismatch(state: WindowState): boolean {
   return dirs.size > 1;
 }
 
+export function windowVerdict(state: WindowState): Verdict {
+  return judge(primaryConsumer(state).snapshot, state.expectedAccount);
+}
+
 // ---------------------------------------------------------------------------
 // Cross-project isolation audit
 // ---------------------------------------------------------------------------
@@ -492,9 +716,9 @@ export function hasConsumerMismatch(state: WindowState): boolean {
 export interface ProjectAudit {
   name: string;
   root: string;
-  /** Config dir declared in the project's .vscode/settings.json, if any. */
-  declaredConfigDir?: string;
-  snapshot?: AccountSnapshot;
+  /** Config dir declared in the project's .vscode/settings.json. */
+  declaredConfigDir: string;
+  snapshot: AccountSnapshot;
   /** Other project names sharing the same config dir. */
   sharesWith: string[];
 }
@@ -521,7 +745,7 @@ export function auditProjects(projectsRoot: string): ProjectAudit[] {
 
     const root = path.join(projectsRoot, entry.name);
     const overrides = readWorkspaceEnvOverrides(root);
-    const declared = overrides.terminalConfigDir ?? overrides.sidebarConfigDir;
+    const declared = overrides.terminalEnv[CONFIG_DIR_VAR] ?? overrides.sidebarEnv[CONFIG_DIR_VAR];
     if (!declared) {
       continue;
     }
@@ -539,7 +763,7 @@ export function auditProjects(projectsRoot: string): ProjectAudit[] {
   // the audit exists to catch.
   for (const audit of audits) {
     audit.sharesWith = audits
-      .filter(other => other !== audit && other.snapshot?.configDir === audit.snapshot?.configDir)
+      .filter(other => other !== audit && other.snapshot.configDir === audit.snapshot.configDir)
       .map(other => other.name);
   }
 

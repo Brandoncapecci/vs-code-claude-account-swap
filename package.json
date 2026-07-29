@@ -19,6 +19,27 @@
     "configuration": {
       "title": "Claude Account",
       "properties": {
+        "claudeAccount.expectedAccount": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "The account this project should use, e.g. `you@work.com` or a wildcard like `*@work.com`. When set, the view states plainly whether the live account is **correct** or **wrong**. Set it per project in workspace settings."
+        },
+        "claudeAccount.verifyWithCli": {
+          "type": "boolean",
+          "default": true,
+          "description": "Verify the account by running `claude auth status --json` for each config dir. This is the authoritative check. Disable to read only from disk."
+        },
+        "claudeAccount.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the claude executable. Empty means auto-detect (~/.local/bin, ~/.claude/local, Homebrew, /usr/local/bin, then PATH)."
+        },
+        "claudeAccount.alertOnWrongAccount": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show an error notification when the live account does not match claudeAccount.expectedAccount."
+        },
         "claudeAccount.scanProjects": {
           "type": "boolean",
           "default": true,
@@ -72,23 +93,33 @@
         "title": "Claude Account: Log In For This Config Dir"
       },
       {
-        "command": "claudeAccount.probeKeychain",
-        "title": "Claude Account: Probe Keychain For Credentials"
+        "command": "claudeAccount.logout",
+        "title": "Claude Account: Log Out Of This Config Dir"
+      },
+      {
+        "command": "claudeAccount.setExpectedAccount",
+        "title": "Claude Account: Set Expected Account For This Project",
+        "icon": "$(check)"
       }
     ],
     "menus": {
       "view/title": [
         {
+          "command": "claudeAccount.setExpectedAccount",
+          "when": "view == claudeAccountView",
+          "group": "navigation@1"
+        },
+        {
           "command": "claudeAccount.refresh",
           "when": "view == claudeAccountView",
-          "group": "navigation"
+          "group": "navigation@2"
         },
         {
           "command": "claudeAccount.login",
           "when": "view == claudeAccountView"
         },
         {
-          "command": "claudeAccount.probeKeychain",
+          "command": "claudeAccount.logout",
           "when": "view == claudeAccountView"
         }
       ],
