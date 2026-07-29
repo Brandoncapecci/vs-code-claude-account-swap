@@ -1,0 +1,120 @@
+{
+  "name": "claude-account",
+  "displayName": "Claude Account",
+  "description": "Shows the live (uncached) Claude Code account for this window, and audits per-project login isolation",
+  "publisher": "Brandoncapecci",
+  "version": "0.0.1",
+  "icon": "resources/icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Claude Account",
+      "properties": {
+        "claudeAccount.scanProjects": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan sibling project folders for CLAUDE_CONFIG_DIR overrides to audit login isolation."
+        },
+        "claudeAccount.projectsRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Folder containing your projects. Empty means the parent folder of the current workspace."
+        },
+        "claudeAccount.refreshInterval": {
+          "type": "number",
+          "default": 0,
+          "description": "Seconds between automatic re-reads. 0 disables polling (files are still watched and re-read on window focus)."
+        },
+        "claudeAccount.statusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the current account in the status bar."
+        }
+      }
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "claudeAccountView",
+          "name": "Claude Account"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeAccount.refresh",
+        "title": "Claude Account: Re-read Now",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeAccount.showDetails",
+        "title": "Claude Account: Show Details"
+      },
+      {
+        "command": "claudeAccount.copyValue",
+        "title": "Claude Account: Copy Value"
+      },
+      {
+        "command": "claudeAccount.openFile",
+        "title": "Claude Account: Open Source File"
+      },
+      {
+        "command": "claudeAccount.login",
+        "title": "Claude Account: Log In For This Config Dir"
+      },
+      {
+        "command": "claudeAccount.probeKeychain",
+        "title": "Claude Account: Probe Keychain For Credentials"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeAccount.refresh",
+          "when": "view == claudeAccountView",
+          "group": "navigation"
+        },
+        {
+          "command": "claudeAccount.login",
+          "when": "view == claudeAccountView"
+        },
+        {
+          "command": "claudeAccount.probeKeychain",
+          "when": "view == claudeAccountView"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudeAccount.copyValue",
+          "when": "view == claudeAccountView && viewItem =~ /copyable/",
+          "group": "inline"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "claudeAccountView",
+        "contents": "Open a workspace folder to see which Claude Code account it uses."
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
