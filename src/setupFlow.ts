@@ -14,6 +14,7 @@ import {
   isExplicitDir,
   isLoggedIn,
   isVerified,
+  primaryConsumer,
   readWorkspaceEnvOverrides,
   storeEnv,
   storeLabel,
@@ -483,6 +484,98 @@ export async function runUseAccountForThisProject(onDone: () => void): Promise<v
 
   onDone();
   await offerReload(folderName, email, configDir ? tilde(configDir) : 'the default store');
+}
+
+/**
+ * Fix a sidebar that resolves a different account from the terminal.
+ *
+ * There is no per-folder fix for `claudeCode.environmentVariables` itself: it is
+ * machine-scoped, so VS Code applies only the user-level value and shows
+ * "This setting can only be applied in user settings" on a workspace one.
+ * That leaves exactly two real routes, both offered here.
+ *
+ * Ruled out by testing, so nobody re-suggests them: an `env` block in
+ * `.claude/settings.local.json` cannot set CLAUDE_CONFIG_DIR (the store has to
+ * be resolved before settings are read — verified, the account does not
+ * change), and `claudeCode.claudeProcessWrapper` is machine-scoped too.
+ */
+export async function runFixSidebar(onDone: () => void): Promise<void> {
+  const folder = await pickFolder();
+  if (!folder) {
+    return;
+  }
+  const state = await loadWindowState();
+  const snapshot = primaryConsumer(state).snapshot;
+  const dir = isExplicitDir(snapshot.source) ? snapshot.configDir : undefined;
+  const account = effectiveEmail(snapshot) ?? 'the terminal account';
+
+  const useTerminal = {
+    label: '$(terminal) Run Claude in a terminal in this project',
+    description: 'per-project',
+    detail:
+      'Sets claudeCode.useTerminal for this folder. A terminal honours per-folder settings, so the account follows the project. You get the terminal UI here instead of the native sidebar.',
+    action: 'terminal' as const,
+  };
+  const allProjects = {
+    label: `$(person) Use ${account} in every project`,
+    description: 'all projects',
+    detail: dir
+      ? `Writes claudeCode.environmentVariables to user settings (${tilde(dir)}). Machine-scoped settings only apply at user level, so this is all-or-nothing across projects.`
+      : 'Clears the user-level override so the sidebar uses the default store everywhere.',
+    action: 'user' as const,
+  };
+
+  const picked = await vscode.window.showQuickPick([useTerminal, allProjects], {
+    title: 'The Claude Code sidebar is on a different account',
+    placeHolder: 'claudeCode.environmentVariables cannot be set per folder — pick a route',
+    matchOnDetail: true,
+  });
+  if (!picked) {
+    return;
+  }
+
+  if (picked.action === 'terminal') {
+    // useTerminal is window-scoped, so unlike environmentVariables it can be
+    // set for one folder.
+    await vscode.workspace
+      .getConfiguration('claudeCode', folder.uri)
+      .update('useTerminal', true, vscode.ConfigurationTarget.Workspace);
+
+    if (state.settingsTracking === 'tracked' && state.overrides.kind === 'parsed') {
+      try {
+        setSkipWorktree(state.overrides.file);
+      } catch {
+        // Best effort; the repo-leak row still flags it.
+      }
+    }
+    onDone();
+    const choice = await vscode.window.showInformationMessage(
+      'Claude Code will open in a terminal in this project, which picks up the folder\'s CLAUDE_CONFIG_DIR. Reload to apply.',
+      'Reload Window',
+      'Not Now'
+    );
+    if (choice === 'Reload Window') {
+      await vscode.commands.executeCommand('workbench.action.reloadWindow');
+    }
+    return;
+  }
+
+  if (dir) {
+    await writeUserStore(dir);
+  } else {
+    await vscode.workspace
+      .getConfiguration('claudeCode')
+      .update('environmentVariables', undefined, vscode.ConfigurationTarget.Global);
+  }
+  onDone();
+  const choice = await vscode.window.showInformationMessage(
+    `The Claude Code sidebar will use ${account} in every project. Reload to apply.`,
+    'Reload Window',
+    'Not Now'
+  );
+  if (choice === 'Reload Window') {
+    await vscode.commands.executeCommand('workbench.action.reloadWindow');
+  }
 }
 
 /** Pin an expected account without touching which store the project uses. */

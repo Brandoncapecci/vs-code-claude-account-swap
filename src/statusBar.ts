@@ -95,7 +95,9 @@ export class StatusBar implements vscode.Disposable {
 
     // Re-logging in cannot fix a routing problem, and on a shared store it would
     // change the account for every other unconfigured project too.
-    const actions = isSecondary || verdict === 'api-key'
+    const actions = isSecondary
+      ? ['Fix Sidebar Account', 'Show Details', "Don't Show Again"]
+      : verdict === 'api-key'
       ? ['Show Details', "Don't Show Again"]
       : state.isolated
         ? ['Log In…', 'Show Details', "Don't Show Again"]
@@ -111,6 +113,9 @@ export class StatusBar implements vscode.Disposable {
         break;
       case 'Use a Different Account Here':
         await vscode.commands.executeCommand('claudeAccount.useAccountForThisProject');
+        break;
+      case 'Fix Sidebar Account':
+        await vscode.commands.executeCommand('claudeAccount.fixSidebar');
         break;
       case 'Show Details':
         await vscode.commands.executeCommand('claudeAccount.showDetails');

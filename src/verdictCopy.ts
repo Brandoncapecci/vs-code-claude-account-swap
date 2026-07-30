@@ -87,10 +87,10 @@ function base(verdict: Verdict, ctx: VerdictContext): VerdictCopy {
             icon: 'warning',
             color: WARN,
             background: 'warning',
-            treeDescription: email,
+            treeDescription: `${email} — click to fix`,
             statusText: `${ctx.offender}: ${email}`,
-            detail: `The ${ctx.offender.toLowerCase()} resolves \`${email}\`, but this project expects \`${ctx.expected}\`. Logging in again cannot fix this — it is a config-dir routing problem, not a credential one.`,
-            command: 'claudeAccount.showDetails',
+            detail: `The ${ctx.offender.toLowerCase()} resolves \`${email}\`, but this project expects \`${ctx.expected}\`. Logging in again cannot fix this — it is a routing problem, not a credential one, because \`claudeCode.environmentVariables\` is machine-scoped and a workspace value is ignored.`,
+            command: 'claudeAccount.fixSidebar',
           }
         : {
             label: 'Wrong account',

@@ -3,7 +3,7 @@
   "displayName": "Claude Account",
   "description": "Pin a Claude Code account per project and see, live, whether you are on the right one",
   "publisher": "Brandoncapecci",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -100,6 +100,12 @@
         "icon": "$(key)"
       },
       {
+        "command": "claudeAccount.fixSidebar",
+        "title": "Fix Sidebar Account",
+        "category": "Claude Account",
+        "icon": "$(tools)"
+      },
+      {
         "command": "claudeAccount.setExpectedAccount",
         "title": "Pin Expected Account",
         "category": "Claude Account",
@@ -162,6 +168,11 @@
           "command": "claudeAccount.logout",
           "when": "view == claudeAccountView",
           "group": "1_auth@2"
+        },
+        {
+          "command": "claudeAccount.fixSidebar",
+          "when": "view == claudeAccountView",
+          "group": "1_auth@3"
         },
         {
           "command": "claudeAccount.setExpectedAccount",

@@ -11,7 +11,12 @@ import {
 } from './accountReader';
 import { AccountItem, AccountProvider } from './accountProvider';
 import { detailsMarkdown } from './detailsReport';
-import { openClaudeTerminal, runSetExpectedAccount, runUseAccountForThisProject } from './setupFlow';
+import {
+  openClaudeTerminal,
+  runFixSidebar,
+  runSetExpectedAccount,
+  runUseAccountForThisProject,
+} from './setupFlow';
 
 /**
  * Wrap a command so a thrown error reaches the user as a real message rather
@@ -37,6 +42,11 @@ export function registerCommands(
     vscode.commands.registerCommand(
       'claudeAccount.useAccountForThisProject',
       guarded('Use a Specific Account', () => runUseAccountForThisProject(onDone))
+    ),
+
+    vscode.commands.registerCommand(
+      'claudeAccount.fixSidebar',
+      guarded('Fix Sidebar Account', () => runFixSidebar(onDone))
     ),
 
     vscode.commands.registerCommand(
