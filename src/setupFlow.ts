@@ -8,6 +8,7 @@ import {
   DEFAULT_CONFIG_DIR,
   PLATFORM_KEY,
   WindowState,
+  auditProjects,
   discoverStores,
   effectiveEmail,
   effectiveOrg,
@@ -518,7 +519,7 @@ export async function runFixSidebar(onDone: () => void): Promise<void> {
   };
   const allProjects = {
     label: `$(person) Use ${account} in every project`,
-    description: 'all projects',
+    description: 'affects other projects',
     detail: dir
       ? `Writes claudeCode.environmentVariables to user settings (${tilde(dir)}). Machine-scoped settings only apply at user level, so this is all-or-nothing across projects.`
       : 'Clears the user-level override so the sidebar uses the default store everywhere.',
@@ -573,6 +574,27 @@ export async function runFixSidebar(onDone: () => void): Promise<void> {
     return;
   }
 
+  // A user-level write applies to every project in the current editor profile.
+  // In the default profile that means literally all of them, so name the ones
+  // it would break rather than letting the user discover it project by project.
+  const conflicts = auditProjects(projectsRoot(state.workspaceRoot) ?? '')
+    .filter(audit => audit.snapshot.configDir !== dir)
+    .map(audit => audit.name);
+
+  if (conflicts.length > 0) {
+    const proceed = await vscode.window.showWarningMessage(
+      `This sets the sidebar to ${account} for every project in this editor profile. ` +
+        `${conflicts.length === 1 ? 'This project uses' : 'These projects use'} a different store and ` +
+        `${conflicts.length === 1 ? 'its' : 'their'} sidebar would become wrong: ${conflicts.join(', ')}.\n\n` +
+        'To keep them separate, cancel and use the profile route instead.',
+      { modal: true },
+      'Apply To All Anyway'
+    );
+    if (proceed !== 'Apply To All Anyway') {
+      return;
+    }
+  }
+
   if (dir) {
     await writeUserStore(dir);
   } else {
@@ -620,9 +642,14 @@ async function runProfileRoute(
     return;
   }
 
-  const command = `cursor --profile ${JSON.stringify(name.trim())} ${JSON.stringify(folder.uri.fsPath)}`;
+  // --new-window matters: without it an already-open folder is merely focused
+  // in the window it is in, keeping its current profile, and the association
+  // silently never happens.
+  const editor = vscode.env.appName.toLowerCase().includes('cursor') ? 'cursor' : 'code';
+  const command = `${editor} --profile ${JSON.stringify(name.trim())} --new-window ${JSON.stringify(folder.uri.fsPath)}`;
+
   const choice = await vscode.window.showInformationMessage(
-    `Run this to reopen "${path.basename(folder.uri.fsPath)}" under the "${name.trim()}" profile. In that window, run Fix Sidebar Account again and choose "Use ${account} in every project" — inside a profile that writes only to the profile.`,
+    `Reopen "${path.basename(folder.uri.fsPath)}" under the "${name.trim()}" profile, then run Fix Sidebar Account again in that window and choose "Use ${account} in every project" — inside a profile that writes only to that profile. Close this window afterwards so the folder is not open twice.`,
     'Run It',
     'Copy Command'
   );
