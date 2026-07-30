@@ -3,7 +3,7 @@
   "displayName": "Claude Account",
   "description": "Pin a Claude Code account per project and see, live, whether you are on the right one",
   "publisher": "Brandoncapecci",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.85.0"

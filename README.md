@@ -69,7 +69,15 @@ Note that user settings alone cannot give two projects two different accounts �
 
 **`CLAUDE_CONFIG_DIR=~/.claude` is not the same as leaving it unset**, even though `~/.claude` is the default directory. An explicit value selects a store at `~/.claude/.claude.json`; unset uses the legacy `~/.claude.json`. Verified: `claude auth status` reports a logged-in account with the variable unset and none with it set to `~/.claude`. A project configured that way looks mysteriously logged out.
 
-**`claudeCode.environmentVariables` is machine-scoped.** VS Code may ignore a workspace-level value, which leaves the sidebar on a different account from the terminal in the same window. The extension compares what your file declares against what the configuration API actually reports and names the store the sidebar will really use.
+**`claudeCode.environmentVariables` is machine-scoped.** VS Code ignores a workspace-level value outright — the settings editor says so on hover — which leaves the native panel on a different account from the terminal in the same window. The extension compares what your file declares against what the configuration API actually reports, and names the store the panel will really use.
+
+**Fix Sidebar Account** offers the only three routes that exist, with their trade-offs stated:
+
+| Route | Scope | Trade-off |
+|---|---|---|
+| **Terminal** *(recommended)* | this project | Claude opens as a terminal here rather than the native panel. One workspace setting, nothing else changes. |
+| **Own editor profile** | this project | Keeps the native panel, but a profile has its own extension list — extensions you install later apply to one profile at a time, and you maintain two. |
+| **User settings** | every project | The only scope the setting is honored in, so it is all-or-nothing. Always asks first, naming the projects it would break. |
 
 ## Settings
 

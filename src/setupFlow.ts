@@ -516,10 +516,10 @@ export async function runFixSidebar(onDone: () => void): Promise<void> {
   // have to reason about editor profiles, or be steered into an "every project"
   // button to achieve a single-project goal.
   const useTerminal = {
-    label: `$(terminal) Use ${account} in this project — terminal instead of the panel`,
-    description: 'this project only',
+    label: `$(check) Use ${account} in this project only`,
+    description: 'recommended · one setting',
     detail:
-      'Runs Claude in an integrated terminal here, which picks up this folder\'s CLAUDE_CONFIG_DIR. Other projects are unaffected. You get the terminal UI in this project rather than the native panel.',
+      'Runs Claude in an integrated terminal here, which picks up this folder\'s CLAUDE_CONFIG_DIR. Trade-off: you get the terminal UI in this project instead of the native panel. Nothing else changes, and other projects are untouched.',
     action: 'terminal' as const,
   };
   const allProjects = {
@@ -532,14 +532,14 @@ export async function runFixSidebar(onDone: () => void): Promise<void> {
   };
 
   const useProfile = {
-    label: `$(check) Use ${account} in this project only`,
-    description: 'recommended · keeps the native panel',
+    label: `$(versions) Use ${account} in this project only — keep the native panel`,
+    description: 'more setup',
     detail:
-      'Reopens this folder in its own editor profile and configures it there automatically. Other projects keep their current accounts.',
+      'Copies your profile into one used only by this folder. Trade-off: a profile keeps its own extension list, so extensions you install later apply to one profile at a time, and you maintain two.',
     action: 'profile' as const,
   };
 
-  const picked = await vscode.window.showQuickPick([useProfile, useTerminal, allProjects], {
+  const picked = await vscode.window.showQuickPick([useTerminal, useProfile, allProjects], {
     title: `Claude Code's panel is signed in as someone else`,
     placeHolder: 'How widely should this apply?',
     matchOnDetail: true,
