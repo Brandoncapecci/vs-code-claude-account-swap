@@ -682,10 +682,46 @@ async function runProfileRoute(
     return;
   }
 
+  // A folder that is already open cannot be reopened under a different
+  // profile — the launcher just focuses the existing window and the profile is
+  // never created. So the window has to go away first, which means scheduling
+  // the launch to land after it does.
+  const isOpenHere = vscode.workspace.workspaceFolders?.some(
+    f => path.resolve(f.uri.fsPath) === path.resolve(folder.uri.fsPath)
+  );
+
+  if (isOpenHere) {
+    const confirmed = await vscode.window.showWarningMessage(
+      `Reopen "${path.basename(folder.uri.fsPath)}" as "${name.trim()}"?`,
+      {
+        modal: true,
+        detail:
+          'This window will close and reopen under the new profile — the editor cannot move an already-open folder to a different profile any other way. Unsaved changes will prompt as usual.',
+      },
+      'Close And Reopen'
+    );
+    if (confirmed !== 'Close And Reopen') {
+      clearHandoff();
+      return;
+    }
+  }
+
   try {
+    if (isOpenHere) {
+      // Delay past this window's teardown, then exec the launcher. Detached and
+      // in its own session so it survives the extension host going away.
+      const script = `sleep 3; exec ${[cli, ...args].map(shellQuote).join(' ')}`;
+      spawn('/bin/sh', ['-c', script], {
+        detached: true,
+        stdio: 'ignore',
+        env: launcherEnv(),
+      }).unref();
+      await vscode.commands.executeCommand('workbench.action.closeWindow');
+      return;
+    }
+
     // Detached so the new window outlives this extension host.
-    const child = spawn(cli, args, { detached: true, stdio: 'ignore', env: launcherEnv() });
-    child.unref();
+    spawn(cli, args, { detached: true, stdio: 'ignore', env: launcherEnv() }).unref();
   } catch (err) {
     clearHandoff();
     void vscode.window.showErrorMessage(`Could not launch the profile window: ${(err as Error).message}`);
@@ -695,8 +731,12 @@ async function runProfileRoute(
   void vscode.window.showInformationMessage(
     `Opening "${path.basename(folder.uri.fsPath)}" in the "${name.trim()}" profile. It will finish setting up ${
       dir ? tilde(dir) : 'the default store'
-    } by itself — you can close this window once it appears.`
+    } by itself.`
   );
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
