@@ -513,33 +513,36 @@ export async function runFixSidebar(onDone: () => void): Promise<void> {
   const dir = isExplicitDir(snapshot.source) ? snapshot.configDir : undefined;
   const account = effectiveEmail(snapshot) ?? 'the terminal account';
 
+  // Labelled by outcome, not mechanism. Someone fixing one project should never
+  // have to reason about editor profiles, or be steered into an "every project"
+  // button to achieve a single-project goal.
   const useTerminal = {
-    label: '$(terminal) Run Claude in a terminal in this project',
-    description: 'per-project',
+    label: `$(terminal) Use ${account} in this project — terminal instead of the panel`,
+    description: 'this project only',
     detail:
-      'Sets claudeCode.useTerminal for this folder. A terminal honours per-folder settings, so the account follows the project. You get the terminal UI here instead of the native sidebar.',
+      'Runs Claude in an integrated terminal here, which picks up this folder\'s CLAUDE_CONFIG_DIR. Other projects are unaffected. You get the terminal UI in this project rather than the native panel.',
     action: 'terminal' as const,
   };
   const allProjects = {
-    label: `$(person) Use ${account} in every project`,
-    description: 'affects other projects',
+    label: `$(warning) Use ${account} in ALL projects`,
+    description: 'changes other projects',
     detail: dir
-      ? `Writes claudeCode.environmentVariables to user settings (${tilde(dir)}). Machine-scoped settings only apply at user level, so this is all-or-nothing across projects.`
-      : 'Clears the user-level override so the sidebar uses the default store everywhere.',
+      ? `Writes it to user settings, which is the only scope this setting honours. Every project without its own profile switches to ${tilde(dir)}.`
+      : 'Clears the override so every project without its own profile uses the default store.',
     action: 'user' as const,
   };
 
   const useProfile = {
-    label: '$(versions) Open this project in its own editor profile',
-    description: 'per-project, keeps the native UI',
+    label: `$(check) Use ${account} in this project only`,
+    description: 'recommended · keeps the native panel',
     detail:
-      'A profile has its own user settings, and machine-scoped settings live there — so each profile can point at a different store. The only route that gives per-project accounts AND the native sidebar.',
+      'Reopens this folder in its own editor profile and configures it there automatically. Other projects keep their current accounts.',
     action: 'profile' as const,
   };
 
   const picked = await vscode.window.showQuickPick([useProfile, useTerminal, allProjects], {
-    title: 'The Claude Code sidebar is on a different account',
-    placeHolder: 'claudeCode.environmentVariables cannot be set per folder — pick a route',
+    title: `Claude Code's panel is signed in as someone else`,
+    placeHolder: 'How widely should this apply?',
     matchOnDetail: true,
   });
   if (!picked) {
@@ -584,18 +587,24 @@ export async function runFixSidebar(onDone: () => void): Promise<void> {
     .filter(audit => audit.snapshot.configDir !== dir)
     .map(audit => audit.name);
 
-  if (conflicts.length > 0) {
-    const proceed = await vscode.window.showWarningMessage(
-      `This sets the sidebar to ${account} for every project in this editor profile. ` +
-        `${conflicts.length === 1 ? 'This project uses' : 'These projects use'} a different store and ` +
-        `${conflicts.length === 1 ? 'its' : 'their'} sidebar would become wrong: ${conflicts.join(', ')}.\n\n` +
-        'To keep them separate, cancel and use the profile route instead.',
-      { modal: true },
-      'Apply To All Anyway'
-    );
-    if (proceed !== 'Apply To All Anyway') {
-      return;
-    }
+  // Always confirm: this is the one option that reaches outside the current
+  // project, and the detected-conflict list is only as complete as the folders
+  // we happened to scan.
+  const proceed = await vscode.window.showWarningMessage(
+    `Set the Claude Code panel to ${account} for every project in this editor profile?`,
+    {
+      modal: true,
+      detail:
+        conflicts.length > 0
+          ? `${conflicts.length === 1 ? 'This project uses' : 'These projects use'} a different account and ` +
+            `${conflicts.length === 1 ? 'its' : 'their'} panel would become wrong: ${conflicts.join(', ')}.\n\n` +
+            'To change only this project, cancel and pick the first option instead.'
+          : 'Any other project without its own profile will switch too.\n\nTo change only this project, cancel and pick the first option instead.',
+    },
+    'Change All Projects'
+  );
+  if (proceed !== 'Change All Projects') {
+    return;
   }
 
   if (dir) {
