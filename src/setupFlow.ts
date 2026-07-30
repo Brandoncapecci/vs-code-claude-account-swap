@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { spawn } from 'child_process';
 import {
   AccountSnapshot,
   CONFIG_DIR_VAR,
@@ -643,140 +642,33 @@ async function runProfileRoute(
   dir: string | undefined,
   account: string
 ): Promise<void> {
-  const suggested = `Claude ${path.basename(folder.uri.fsPath)}`;
-  const name = await vscode.window.showInputBox({
-    title: 'Name the editor profile',
-    prompt: 'The folder reopens under this profile and stays associated with it.',
-    value: suggested,
-    validateInput: v => (v && v.trim() ? undefined : 'Enter a profile name.'),
-  });
-  if (!name) {
+  const confirmed = await vscode.window.showInformationMessage(
+    `Give "${path.basename(folder.uri.fsPath)}" its own profile?`,
+    {
+      modal: true,
+      detail:
+        'Your current profile — extensions, theme and settings — is copied into a new one used only by this folder, and this window switches to it. ' +
+        `${account} is applied automatically once it does.\n\n` +
+        'Name the profile in the editor that opens, then choose Create. Note that a profile keeps its own extension list, so extensions you install later apply to one profile at a time.',
+    },
+    'Continue'
+  );
+  if (confirmed !== 'Continue') {
     return;
   }
 
-  // --new-window matters: without it an already-open folder is merely focused
-  // in the window it is in, keeping its current profile, so the association
-  // silently never happens and no profile is created.
-  const args = ['--profile', name.trim(), '--new-window', folder.uri.fsPath];
-  const cli = editorCliPath();
-
-  // Leave the note that lets the new window finish the job by itself.
   writeHandoff({
     folder: folder.uri.fsPath,
     configDir: dir,
     account,
-    profileName: name.trim(),
     createdAt: Date.now(),
   });
 
-  if (!cli) {
-    // No bundled CLI found: fall back to handing over the command.
-    const command = `code ${args.map(a => JSON.stringify(a)).join(' ')}`;
-    const choice = await vscode.window.showWarningMessage(
-      `Could not find the editor's command-line launcher. Run this yourself to finish:\n\n${command}`,
-      'Copy Command'
-    );
-    if (choice === 'Copy Command') {
-      await vscode.env.clipboard.writeText(command);
-    }
-    return;
-  }
-
-  // A folder that is already open cannot be reopened under a different
-  // profile — the launcher just focuses the existing window and the profile is
-  // never created. So the window has to go away first, which means scheduling
-  // the launch to land after it does.
-  const isOpenHere = vscode.workspace.workspaceFolders?.some(
-    f => path.resolve(f.uri.fsPath) === path.resolve(folder.uri.fsPath)
-  );
-
-  if (isOpenHere) {
-    const confirmed = await vscode.window.showWarningMessage(
-      `Reopen "${path.basename(folder.uri.fsPath)}" as "${name.trim()}"?`,
-      {
-        modal: true,
-        detail:
-          'This window will close and reopen under the new profile — the editor cannot move an already-open folder to a different profile any other way. Unsaved changes will prompt as usual.',
-      },
-      'Close And Reopen'
-    );
-    if (confirmed !== 'Close And Reopen') {
-      clearHandoff();
-      return;
-    }
-  }
-
-  try {
-    if (isOpenHere) {
-      // Delay past this window's teardown, then exec the launcher. Detached and
-      // in its own session so it survives the extension host going away.
-      const script = `sleep 3; exec ${[cli, ...args].map(shellQuote).join(' ')}`;
-      spawn('/bin/sh', ['-c', script], {
-        detached: true,
-        stdio: 'ignore',
-        env: launcherEnv(),
-      }).unref();
-      await vscode.commands.executeCommand('workbench.action.closeWindow');
-      return;
-    }
-
-    // Detached so the new window outlives this extension host.
-    spawn(cli, args, { detached: true, stdio: 'ignore', env: launcherEnv() }).unref();
-  } catch (err) {
-    clearHandoff();
-    void vscode.window.showErrorMessage(`Could not launch the profile window: ${(err as Error).message}`);
-    return;
-  }
-
-  void vscode.window.showInformationMessage(
-    `Opening "${path.basename(folder.uri.fsPath)}" in the "${name.trim()}" profile. It will finish setting up ${
-      dir ? tilde(dir) : 'the default store'
-    } by itself.`
-  );
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-/**
- * Environment for launching a new editor window.
- *
- * An extension host runs as Electron-as-node and exports `ELECTRON_RUN_AS_NODE`
- * and `VSCODE_ESM_ENTRYPOINT` to everything it spawns. Inheriting those points
- * the launcher's Electron at the extension-host entrypoint instead of the CLI,
- * so it exits 0 having done nothing — no window, no profile, no error. Verified:
- * with these stripped the profile is created and associated; with them inherited
- * nothing happens at all.
- */
-function launcherEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (/^(ELECTRON_|VSCODE_|CURSOR_SPAWN|CURSOR_EXTENSION_HOST)/.test(key)) {
-      delete env[key];
-    }
-  }
-  return env;
-}
-
-/**
- * The editor's own command-line launcher, inside the app bundle.
- *
- * Resolved from `appRoot` rather than PATH: an extension host does not get the
- * user's shell PATH, and `code`/`cursor` may never have been added to it.
- */
-function editorCliPath(): string | undefined {
-  const bin = path.join(vscode.env.appRoot, 'bin');
-  const preferred = vscode.env.appName.toLowerCase().includes('cursor')
-    ? ['cursor', 'code']
-    : ['code', 'cursor'];
-  for (const name of preferred) {
-    const candidate = path.join(bin, name);
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return undefined;
+  // "Save Current Profile As…" — copies the current profile rather than
+  // creating an empty one. The CLI's --profile makes a blank profile with no
+  // extensions and a default theme, which is not a usable workspace.
+  await vscode.commands.executeCommand('workbench.profiles.actions.createFromCurrentProfile');
+  return;
 }
 
 /**
