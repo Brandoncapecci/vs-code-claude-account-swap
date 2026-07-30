@@ -3,6 +3,7 @@ import { AccountProvider } from './accountProvider';
 import { registerCommands } from './commands';
 import { StatusBar } from './statusBar';
 import { initPinStore } from './pinStore';
+import { consumeProfileHandoff } from './setupFlow';
 
 /** How long after a load a window-focus event is treated as redundant. */
 const FOCUS_COOLDOWN_MS = 2000;
@@ -53,6 +54,10 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   registerCommands(context, provider);
+
+  // If this window was opened by the profile route, finish that setup here —
+  // Global scope means this profile only.
+  void consumeProfileHandoff(() => provider.refresh());
 
   void provider.load().catch(err => {
     void vscode.window.showErrorMessage(`Claude Account failed to start: ${(err as Error).message}`);

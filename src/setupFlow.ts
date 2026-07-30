@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { spawn } from 'child_process';
 import {
   AccountSnapshot,
   CONFIG_DIR_VAR,
@@ -15,6 +16,7 @@ import {
   isExplicitDir,
   isLoggedIn,
   isVerified,
+  normalizeEnvBlock,
   primaryConsumer,
   readWorkspaceEnvOverrides,
   storeEnv,
@@ -22,7 +24,8 @@ import {
   tilde,
   verifyWithCli,
 } from './accountReader';
-import { claudePath, loadWindowState, projectsRoot } from './settings';
+import { claudePath, currentFolderPath, loadWindowState, projectsRoot } from './settings';
+import { clearHandoff, readHandoff, writeHandoff } from './profileHandoff';
 import { writeProjectAccountSettings } from './settingsIo';
 import { TrackingState, setSkipWorktree, wouldDirtyRepo } from './gitTracking';
 import { setPin } from './pinStore';
@@ -643,29 +646,117 @@ async function runProfileRoute(
   }
 
   // --new-window matters: without it an already-open folder is merely focused
-  // in the window it is in, keeping its current profile, and the association
-  // silently never happens.
-  const editor = vscode.env.appName.toLowerCase().includes('cursor') ? 'cursor' : 'code';
-  const command = `${editor} --profile ${JSON.stringify(name.trim())} --new-window ${JSON.stringify(folder.uri.fsPath)}`;
+  // in the window it is in, keeping its current profile, so the association
+  // silently never happens and no profile is created.
+  const args = ['--profile', name.trim(), '--new-window', folder.uri.fsPath];
+  const cli = editorCliPath();
 
-  const choice = await vscode.window.showInformationMessage(
-    `Reopen "${path.basename(folder.uri.fsPath)}" under the "${name.trim()}" profile, then run Fix Sidebar Account again in that window and choose "Use ${account} in every project" — inside a profile that writes only to that profile. Close this window afterwards so the folder is not open twice.`,
-    'Run It',
-    'Copy Command'
-  );
+  // Leave the note that lets the new window finish the job by itself.
+  writeHandoff({
+    folder: folder.uri.fsPath,
+    configDir: dir,
+    account,
+    profileName: name.trim(),
+    createdAt: Date.now(),
+  });
 
-  if (choice === 'Run It') {
-    const terminal = vscode.window.createTerminal({ name: 'Claude Profile', cwd: folder.uri.fsPath });
-    terminal.show();
-    terminal.sendText(command);
-  } else if (choice === 'Copy Command') {
-    await vscode.env.clipboard.writeText(command);
-    void vscode.window.showInformationMessage('Command copied.');
+  if (!cli) {
+    // No bundled CLI found: fall back to handing over the command.
+    const command = `code ${args.map(a => JSON.stringify(a)).join(' ')}`;
+    const choice = await vscode.window.showWarningMessage(
+      `Could not find the editor's command-line launcher. Run this yourself to finish:\n\n${command}`,
+      'Copy Command'
+    );
+    if (choice === 'Copy Command') {
+      await vscode.env.clipboard.writeText(command);
+    }
+    return;
   }
 
-  if (dir) {
-    // Leave a breadcrumb so the second step is obvious in the new window.
-    void vscode.window.setStatusBarMessage(`Profile target store: ${tilde(dir)}`, 8000);
+  try {
+    // Detached so the new window outlives this extension host.
+    const child = spawn(cli, args, { detached: true, stdio: 'ignore' });
+    child.unref();
+  } catch (err) {
+    clearHandoff();
+    void vscode.window.showErrorMessage(`Could not launch the profile window: ${(err as Error).message}`);
+    return;
+  }
+
+  void vscode.window.showInformationMessage(
+    `Opening "${path.basename(folder.uri.fsPath)}" in the "${name.trim()}" profile. It will finish setting up ${
+      dir ? tilde(dir) : 'the default store'
+    } by itself — you can close this window once it appears.`
+  );
+}
+
+/**
+ * The editor's own command-line launcher, inside the app bundle.
+ *
+ * Resolved from `appRoot` rather than PATH: an extension host does not get the
+ * user's shell PATH, and `code`/`cursor` may never have been added to it.
+ */
+function editorCliPath(): string | undefined {
+  const bin = path.join(vscode.env.appRoot, 'bin');
+  const preferred = vscode.env.appName.toLowerCase().includes('cursor')
+    ? ['cursor', 'code']
+    : ['code', 'cursor'];
+  for (const name of preferred) {
+    const candidate = path.join(bin, name);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Second half of the profile route, run in the newly opened window.
+ *
+ * Writing at Global scope here lands in *this profile's* user settings, which
+ * is the whole point: the same write that would hit every project from the
+ * default profile is confined to this one.
+ */
+export async function consumeProfileHandoff(onDone: () => void): Promise<void> {
+  const folder = currentFolderPath();
+  const handoff = readHandoff(folder);
+  if (!handoff) {
+    return;
+  }
+  clearHandoff();
+
+  const already = normalizeEnvBlock(
+    vscode.workspace.getConfiguration('claudeCode').get('environmentVariables')
+  )[CONFIG_DIR_VAR];
+  if (already === handoff.configDir) {
+    return;
+  }
+
+  try {
+    if (handoff.configDir) {
+      await writeUserStore(handoff.configDir);
+    } else {
+      await vscode.workspace
+        .getConfiguration('claudeCode')
+        .update('environmentVariables', undefined, vscode.ConfigurationTarget.Global);
+    }
+  } catch (err) {
+    void vscode.window.showErrorMessage(
+      `Could not finish profile setup: ${(err as Error).message}`
+    );
+    return;
+  }
+
+  onDone();
+  const choice = await vscode.window.showInformationMessage(
+    `This window's "${handoff.profileName}" profile now uses ${handoff.account ?? 'the selected account'}${
+      handoff.configDir ? ` (${tilde(handoff.configDir)})` : ''
+    }. Other projects are unaffected. Reload to apply it to the Claude Code panel.`,
+    'Reload Window',
+    'Not Now'
+  );
+  if (choice === 'Reload Window') {
+    await vscode.commands.executeCommand('workbench.action.reloadWindow');
   }
 }
 
