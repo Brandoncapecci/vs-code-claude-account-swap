@@ -525,12 +525,25 @@ export async function runFixSidebar(onDone: () => void): Promise<void> {
     action: 'user' as const,
   };
 
-  const picked = await vscode.window.showQuickPick([useTerminal, allProjects], {
+  const useProfile = {
+    label: '$(versions) Open this project in its own editor profile',
+    description: 'per-project, keeps the native UI',
+    detail:
+      'A profile has its own user settings, and machine-scoped settings live there — so each profile can point at a different store. The only route that gives per-project accounts AND the native sidebar.',
+    action: 'profile' as const,
+  };
+
+  const picked = await vscode.window.showQuickPick([useProfile, useTerminal, allProjects], {
     title: 'The Claude Code sidebar is on a different account',
     placeHolder: 'claudeCode.environmentVariables cannot be set per folder — pick a route',
     matchOnDetail: true,
   });
   if (!picked) {
+    return;
+  }
+
+  if (picked.action === 'profile') {
+    await runProfileRoute(folder, dir, account);
     return;
   }
 
@@ -575,6 +588,57 @@ export async function runFixSidebar(onDone: () => void): Promise<void> {
   );
   if (choice === 'Reload Window') {
     await vscode.commands.executeCommand('workbench.action.reloadWindow');
+  }
+}
+
+/**
+ * Reopen the folder under its own editor profile.
+ *
+ * This is the only route that gets a per-project account *and* keeps the native
+ * Claude Code panel. A profile carries its own user settings, and machine-scoped
+ * settings such as `claudeCode.environmentVariables` are stored there rather
+ * than shared — settings that must be shared across profiles use the separate
+ * "application" scope instead.
+ *
+ * Two steps, because the second one has to run inside the new profile's window:
+ * open the folder with `--profile`, then use *Use in every project* there, which
+ * writes to that profile's user settings and so applies only inside it.
+ */
+async function runProfileRoute(
+  folder: vscode.WorkspaceFolder,
+  dir: string | undefined,
+  account: string
+): Promise<void> {
+  const suggested = `Claude ${path.basename(folder.uri.fsPath)}`;
+  const name = await vscode.window.showInputBox({
+    title: 'Name the editor profile',
+    prompt: 'The folder reopens under this profile and stays associated with it.',
+    value: suggested,
+    validateInput: v => (v && v.trim() ? undefined : 'Enter a profile name.'),
+  });
+  if (!name) {
+    return;
+  }
+
+  const command = `cursor --profile ${JSON.stringify(name.trim())} ${JSON.stringify(folder.uri.fsPath)}`;
+  const choice = await vscode.window.showInformationMessage(
+    `Run this to reopen "${path.basename(folder.uri.fsPath)}" under the "${name.trim()}" profile. In that window, run Fix Sidebar Account again and choose "Use ${account} in every project" — inside a profile that writes only to the profile.`,
+    'Run It',
+    'Copy Command'
+  );
+
+  if (choice === 'Run It') {
+    const terminal = vscode.window.createTerminal({ name: 'Claude Profile', cwd: folder.uri.fsPath });
+    terminal.show();
+    terminal.sendText(command);
+  } else if (choice === 'Copy Command') {
+    await vscode.env.clipboard.writeText(command);
+    void vscode.window.showInformationMessage('Command copied.');
+  }
+
+  if (dir) {
+    // Leave a breadcrumb so the second step is obvious in the new window.
+    void vscode.window.setStatusBarMessage(`Profile target store: ${tilde(dir)}`, 8000);
   }
 }
 
