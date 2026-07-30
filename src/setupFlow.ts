@@ -684,7 +684,7 @@ async function runProfileRoute(
 
   try {
     // Detached so the new window outlives this extension host.
-    const child = spawn(cli, args, { detached: true, stdio: 'ignore' });
+    const child = spawn(cli, args, { detached: true, stdio: 'ignore', env: launcherEnv() });
     child.unref();
   } catch (err) {
     clearHandoff();
@@ -697,6 +697,26 @@ async function runProfileRoute(
       dir ? tilde(dir) : 'the default store'
     } by itself — you can close this window once it appears.`
   );
+}
+
+/**
+ * Environment for launching a new editor window.
+ *
+ * An extension host runs as Electron-as-node and exports `ELECTRON_RUN_AS_NODE`
+ * and `VSCODE_ESM_ENTRYPOINT` to everything it spawns. Inheriting those points
+ * the launcher's Electron at the extension-host entrypoint instead of the CLI,
+ * so it exits 0 having done nothing — no window, no profile, no error. Verified:
+ * with these stripped the profile is created and associated; with them inherited
+ * nothing happens at all.
+ */
+function launcherEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (/^(ELECTRON_|VSCODE_|CURSOR_SPAWN|CURSOR_EXTENSION_HOST)/.test(key)) {
+      delete env[key];
+    }
+  }
+  return env;
 }
 
 /**
