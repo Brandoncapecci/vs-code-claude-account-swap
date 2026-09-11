@@ -8,7 +8,9 @@ import {
   DEFAULT_CONFIG_DIR,
   PLATFORM_KEY,
   WindowState,
+  WriteTarget,
   auditProjects,
+  existingWriteTarget,
   discoverStores,
   effectiveEmail,
   effectiveOrg,
@@ -193,7 +195,6 @@ function storeChoices(state: WindowState): StoreChoice[] {
 // The flow
 // ---------------------------------------------------------------------------
 
-type WriteTarget = 'folder' | 'user';
 
 /**
  * Decide where `CLAUDE_CONFIG_DIR` should be written.
@@ -439,7 +440,31 @@ export async function runUseAccountForThisProject(onDone: () => void): Promise<v
     }
   }
 
-  const target = await chooseWriteTarget(folderName, state.settingsTracking);
+  await applyStore({ folderPath, folderName, state, configDir, email, onDone });
+}
+
+/**
+ * Point a folder at a store, sign in if it has none, and pin what we saw.
+ *
+ * The tail of choosing an account, shared by the guided setup and the one-step
+ * switch, because the two differ only in how the store is chosen. A switch that
+ * wrote the setting its own way would be a second answer to "where does
+ * CLAUDE_CONFIG_DIR live for this folder", and the two would drift.
+ */
+async function applyStore(input: {
+  folderPath: string;
+  folderName: string;
+  state: WindowState;
+  configDir: string | undefined;
+  email: string | undefined;
+  onDone: () => void;
+  /** Skip the where-should-this-go question when the answer is already on disk. */
+  target?: WriteTarget;
+}): Promise<void> {
+  const { folderPath, folderName, state, configDir, onDone } = input;
+  let email = input.email;
+
+  const target = input.target ?? (await chooseWriteTarget(folderName, state.settingsTracking));
   if (!target) {
     return;
   }
@@ -487,6 +512,83 @@ export async function runUseAccountForThisProject(onDone: () => void): Promise<v
 
   onDone();
   await offerReload(folderName, email, configDir ? tilde(configDir) : 'the default store');
+}
+
+/**
+ * Switch this folder to another account in one step.
+ *
+ * The guided flow exists to *set up* isolation and asks the questions that go
+ * with it. Once a folder has a store, changing which one is a single choice,
+ * and making someone walk the setup again to make it is the reason people go
+ * back to editing settings.json by hand.
+ *
+ * Only stores that already hold a login are offered. Creating a store, signing
+ * into an empty one, and pinning an expectation are all the setup flow's job,
+ * reachable from the last entry rather than duplicated here.
+ */
+export async function runSwitchAccount(onDone: () => void): Promise<void> {
+  const folder = await pickFolder();
+  if (!folder) {
+    return;
+  }
+  const folderPath = folder.uri.fsPath;
+  const folderName = path.basename(folderPath);
+
+  const state = await loadWindowState();
+  const current = primaryConsumer(state).snapshot;
+  const currentDir = isExplicitDir(current.source) ? current.configDir : undefined;
+
+  const stores = discoverStores(state, projectsRoot(state.workspaceRoot))
+    .filter(store => effectiveEmail(store.snapshot))
+    .sort((a, b) => (effectiveEmail(a.snapshot) ?? '').localeCompare(effectiveEmail(b.snapshot) ?? ''));
+
+  const items: (vscode.QuickPickItem & { configDir?: string; email?: string; setup?: true })[] =
+    stores.map(store => {
+      const inUse = store.configDir === currentDir;
+      return {
+        label: `${inUse ? '$(check)' : '$(account)'} ${effectiveEmail(store.snapshot)}`,
+        description: [effectiveOrg(store.snapshot), inUse ? 'current' : undefined]
+          .filter(Boolean)
+          .join(' · '),
+        detail: storeLabel(store.snapshot),
+        configDir: store.configDir,
+        email: effectiveEmail(store.snapshot) ?? undefined,
+      };
+    });
+
+  items.push({
+    label: '$(gear) Set up another account…',
+    detail: 'Create a store, sign in, or pin what this project should expect',
+    setup: true,
+    alwaysShow: true,
+  });
+
+  const picked = await vscode.window.showQuickPick(items, {
+    title: `Which Claude account should "${folderName}" use?`,
+    placeHolder: 'Pick an account',
+    matchOnDetail: true,
+  });
+  if (!picked) {
+    return;
+  }
+  if (picked.setup) {
+    await runUseAccountForThisProject(onDone);
+    return;
+  }
+  if (picked.configDir === currentDir) {
+    void vscode.window.showInformationMessage(`${folderName} already uses ${picked.email}.`);
+    return;
+  }
+
+  await applyStore({
+    folderPath,
+    folderName,
+    state,
+    configDir: picked.configDir,
+    email: picked.email,
+    onDone,
+    target: existingWriteTarget(state),
+  });
 }
 
 /**

@@ -3,7 +3,7 @@
   "displayName": "Claude Account",
   "description": "Pin a Claude Code account per project and see, live, whether you are on the right one",
   "publisher": "Brandoncapecci",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -94,6 +94,12 @@
     },
     "commands": [
       {
+        "command": "claudeAccount.switchAccount",
+        "title": "Switch Account",
+        "category": "Claude Account",
+        "icon": "$(arrow-swap)"
+      },
+      {
         "command": "claudeAccount.useAccountForThisProject",
         "title": "Use a Specific Account For This Project",
         "category": "Claude Account",
@@ -149,6 +155,11 @@
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "claudeAccount.switchAccount",
+          "when": "view == claudeAccountView",
+          "group": "navigation@0"
+        },
         {
           "command": "claudeAccount.useAccountForThisProject",
           "when": "view == claudeAccountView",

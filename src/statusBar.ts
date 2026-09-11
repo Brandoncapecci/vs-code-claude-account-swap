@@ -16,7 +16,7 @@ export class StatusBar implements vscode.Disposable {
   constructor(private readonly treeView: vscode.TreeView<unknown>) {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
     this.item.name = 'Claude Account';
-    this.item.command = 'claudeAccount.showDetails';
+    this.item.command = 'claudeAccount.switchAccount';
     this.showChecking();
   }
 
@@ -52,7 +52,7 @@ export class StatusBar implements vscode.Disposable {
         md.appendMarkdown(`- Expected: \`${state.expectedAccount}\`\n`);
       }
       md.appendMarkdown(accountTooltip(snapshot, consumer.name).value);
-      md.appendMarkdown('\n\nClick for the full report.');
+      md.appendMarkdown('\n\nClick to switch account.');
       this.item.tooltip = md;
       this.item.show();
     }

@@ -15,6 +15,7 @@ import {
   openClaudeTerminal,
   runFixSidebar,
   runSetExpectedAccount,
+  runSwitchAccount,
   runUseAccountForThisProject,
 } from './setupFlow';
 
@@ -39,6 +40,11 @@ export function registerCommands(
   const onDone = () => provider.refresh();
 
   context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'claudeAccount.switchAccount',
+      guarded('Switch Account', () => runSwitchAccount(onDone))
+    ),
+
     vscode.commands.registerCommand(
       'claudeAccount.useAccountForThisProject',
       guarded('Use a Specific Account', () => runUseAccountForThisProject(onDone))

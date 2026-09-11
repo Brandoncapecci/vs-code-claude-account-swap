@@ -777,6 +777,26 @@ export function readWindowState(
   };
 }
 
+/** The two scopes a folder's CLAUDE_CONFIG_DIR can be written to. */
+export type WriteTarget = 'folder' | 'user';
+
+/**
+ * Where this folder's CLAUDE_CONFIG_DIR already lives.
+ *
+ * Changing which account a folder uses should land where the setting is today
+ * rather than ask again. The folder file wins when it declares one, because
+ * that is what VS Code would apply; otherwise an effective value on the
+ * terminal came from the user or profile level, so that is where to update it.
+ * Undefined means nothing declares it yet and the question is worth asking.
+ */
+export function existingWriteTarget(state: WindowState): WriteTarget | undefined {
+  if (state.overrides.terminalEnv[CONFIG_DIR_VAR] !== undefined) {
+    return 'folder';
+  }
+  const terminal = state.consumers.find(consumer => consumer.kind === 'terminal');
+  return terminal && terminal.env[CONFIG_DIR_VAR] !== undefined ? 'user' : undefined;
+}
+
 /** Attach live CLI answers to every consumer, one call per distinct store+env. */
 export async function verifyWindowState(state: WindowState, claudePath: string): Promise<void> {
   const byKey = new Map<string, ResolvedConsumer[]>();
