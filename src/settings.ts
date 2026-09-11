@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import {
   ReadOptions,
+  TerminalProfile,
   WindowState,
   expandHome,
   PLATFORM_KEY,
@@ -92,6 +93,28 @@ function effectiveTerminalEnv(): Record<string, string> {
   );
 }
 
+/**
+ * The terminal profiles this window offers, and which one is the default.
+ *
+ * A profile's `env` is merged after `terminal.integrated.env.<platform>`, so a
+ * profile that sets CLAUDE_CONFIG_DIR decides the account for terminals
+ * launched with it — which is how two accounts run side by side in one window.
+ * Reading only the blanket setting would report an account no terminal uses.
+ */
+function terminalProfiles(): TerminalProfile[] {
+  const terminal = vscode.workspace.getConfiguration('terminal.integrated');
+  const defaultName = terminal.get<string>(`defaultProfile.${PLATFORM_KEY}`);
+  const profiles = terminal.get<Record<string, unknown>>(`profiles.${PLATFORM_KEY}`) ?? {};
+
+  return Object.entries(profiles)
+    .filter(([, value]) => value && typeof value === 'object')
+    .map(([name, value]) => ({
+      name,
+      env: normalizeEnvBlock((value as { env?: unknown }).env),
+      isDefault: name === defaultName,
+    }));
+}
+
 /** Read the window state and verify it against the live CLI. */
 export async function loadWindowState(): Promise<WindowState> {
   const folder = currentFolderPath();
@@ -101,6 +124,7 @@ export async function loadWindowState(): Promise<WindowState> {
     expectedAccountSource: pinned.source,
     effectiveSidebarEnv: effectiveSidebarEnv(),
     effectiveTerminalEnv: effectiveTerminalEnv(),
+    terminalProfiles: terminalProfiles(),
     claudeCodeInstalled: vscode.extensions.getExtension(CLAUDE_CODE_EXTENSION_ID) !== undefined,
   };
 

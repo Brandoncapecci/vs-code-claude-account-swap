@@ -239,6 +239,7 @@ export interface OnDiskAccount {
 export type ConfigDirSource =
   | 'process env'
   | 'settings (terminal)'
+  | 'terminal profile'
   | 'settings (sidebar)'
   | 'default';
 
@@ -602,7 +603,7 @@ export function apiKeyVarsInSettingsFiles(
 // Resolution: who reads which store
 // ---------------------------------------------------------------------------
 
-export type ConsumerKind = 'terminal' | 'sidebar' | 'extensionHost';
+export type ConsumerKind = 'terminal' | 'terminalProfile' | 'sidebar' | 'extensionHost';
 
 export interface ResolvedConsumer {
   kind: ConsumerKind;
@@ -661,6 +662,14 @@ function snapshotFor(explicit: string | undefined, source: ConfigDirSource, base
     : readAccount(DEFAULT_CONFIG_DIR, 'default');
 }
 
+export interface TerminalProfile {
+  name: string;
+  /** The profile's own env block, already normalized. */
+  env: Record<string, string>;
+  /** True for `terminal.integrated.defaultProfile.<platform>`. */
+  isDefault: boolean;
+}
+
 export interface ReadOptions {
   expectedAccount?: string;
   expectedAccountSource?: 'settings' | 'machine';
@@ -681,6 +690,16 @@ export interface ReadOptions {
    * account for the one consumer the user is actually typing into.
    */
   effectiveTerminalEnv?: Record<string, string>;
+  /**
+   * The terminal profiles this window offers, with the env each one launches.
+   *
+   * A profile's `env` is merged after `terminal.integrated.env.<platform>`, so
+   * it WINS — verified against the terminal's own environment assembly. That
+   * makes profiles the way to run two accounts side by side in one window, and
+   * it means the blanket setting alone no longer answers "which account does a
+   * terminal get": the default profile does, when it names a store.
+   */
+  terminalProfiles?: TerminalProfile[];
   /** Whether the Claude Code extension is installed at all. */
   claudeCodeInstalled?: boolean;
 }
@@ -694,7 +713,16 @@ export function readWindowState(
 
   // What each consumer will actually get, which is the configuration API's
   // merge when we have it, and the folder file alone when we do not.
-  const terminalEnv = options.effectiveTerminalEnv ?? overrides.terminalEnv;
+  const settingsTerminalEnv = options.effectiveTerminalEnv ?? overrides.terminalEnv;
+  const profiles = options.terminalProfiles ?? [];
+  // A profile's env is merged after the blanket setting, so a default profile
+  // that names a store is what a new terminal actually gets.
+  const defaultProfile = profiles.find(
+    profile => profile.isDefault && profile.env[CONFIG_DIR_VAR] !== undefined,
+  );
+  const terminalEnv = defaultProfile
+    ? { ...settingsTerminalEnv, ...defaultProfile.env }
+    : settingsTerminalEnv;
   const terminalDir = terminalEnv[CONFIG_DIR_VAR];
   const declaredSidebarDir = overrides.sidebarEnv[CONFIG_DIR_VAR];
   // Prefer what VS Code actually resolves for the sidebar over what the file
@@ -704,7 +732,11 @@ export function readWindowState(
 
   const processSnapshot = snapshotFor(processConfigDir, 'process env', workspaceRoot);
   const terminalSnapshot = terminalDir
-    ? snapshotFor(terminalDir, 'settings (terminal)', workspaceRoot)
+    ? snapshotFor(
+        terminalDir,
+        defaultProfile ? 'terminal profile' : 'settings (terminal)',
+        workspaceRoot,
+      )
     : snapshotFor(processConfigDir, 'process env', workspaceRoot);
   const sidebarSnapshot = sidebarDir
     ? snapshotFor(sidebarDir, 'settings (sidebar)', workspaceRoot)
@@ -716,15 +748,30 @@ export function readWindowState(
   const consumers: ResolvedConsumer[] = [
     {
       kind: 'terminal',
-      name: 'Terminal',
+      name: defaultProfile ? `Terminal (${defaultProfile.name})` : 'Terminal',
       snapshot: terminalSnapshot,
       env: terminalEnv,
       caveat: !terminalDir
         ? 'No terminal.integrated.env override — inherits the process environment.'
-        : overrides.terminalEnv[CONFIG_DIR_VAR] === undefined
-          ? `From your user or profile settings, not this folder — VS Code merges all three and hands the terminal ${terminalDir}.`
-          : undefined,
+        : defaultProfile
+          ? `The default terminal profile "${defaultProfile.name}" sets this. A profile's env beats terminal.integrated.env, so this is what a new terminal gets.`
+          : overrides.terminalEnv[CONFIG_DIR_VAR] === undefined
+            ? `From your user or profile settings, not this folder — VS Code merges all three and hands the terminal ${terminalDir}.`
+            : undefined,
     },
+    // Every other profile that names a store. These are context, not drift:
+    // running two accounts side by side is the point of having them, so they
+    // must never make the window look wrong.
+    ...profiles
+      .filter(profile => profile !== defaultProfile && profile.env[CONFIG_DIR_VAR] !== undefined)
+      .map((profile): ResolvedConsumer => ({
+        kind: 'terminalProfile',
+        name: `Terminal (${profile.name})`,
+        snapshot: snapshotFor(profile.env[CONFIG_DIR_VAR], 'terminal profile', workspaceRoot),
+        env: profile.env,
+        diagnosticOnly: true,
+        caveat: `Only terminals launched with the "${profile.name}" profile use this account.`,
+      })),
     {
       kind: 'sidebar',
       name: 'Sidebar',
