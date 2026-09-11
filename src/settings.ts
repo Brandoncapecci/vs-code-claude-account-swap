@@ -4,6 +4,7 @@ import {
   ReadOptions,
   WindowState,
   expandHome,
+  PLATFORM_KEY,
   normalizeEnvBlock,
   readWindowState,
   resolveClaudePath,
@@ -78,6 +79,19 @@ function effectiveSidebarEnv(): Record<string, string> {
   );
 }
 
+/**
+ * `terminal.integrated.env.<platform>` as the configuration API reports it,
+ * which is user, profile and folder settings merged — the same merge VS Code
+ * applies when it spawns a terminal. The folder file alone is not enough: a
+ * profile created by this extension's own setup flow puts CLAUDE_CONFIG_DIR
+ * there, and reading only the folder made that invisible.
+ */
+function effectiveTerminalEnv(): Record<string, string> {
+  return normalizeEnvBlock(
+    vscode.workspace.getConfiguration('terminal.integrated.env').get(PLATFORM_KEY)
+  );
+}
+
 /** Read the window state and verify it against the live CLI. */
 export async function loadWindowState(): Promise<WindowState> {
   const folder = currentFolderPath();
@@ -86,6 +100,7 @@ export async function loadWindowState(): Promise<WindowState> {
     expectedAccount: pinned.value,
     expectedAccountSource: pinned.source,
     effectiveSidebarEnv: effectiveSidebarEnv(),
+    effectiveTerminalEnv: effectiveTerminalEnv(),
     claudeCodeInstalled: vscode.extensions.getExtension(CLAUDE_CODE_EXTENSION_ID) !== undefined,
   };
 

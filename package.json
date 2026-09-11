@@ -124,13 +124,13 @@
       },
       {
         "command": "claudeAccount.login",
-        "title": "Log In…",
+        "title": "Log In\u2026",
         "category": "Claude Account",
         "icon": "$(sign-in)"
       },
       {
         "command": "claudeAccount.logout",
-        "title": "Log Out…",
+        "title": "Log Out\u2026",
         "category": "Claude Account",
         "icon": "$(sign-out)"
       },
@@ -218,7 +218,8 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "test": "tsx --test test/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

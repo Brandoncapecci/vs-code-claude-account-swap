@@ -238,8 +238,8 @@ export interface OnDiskAccount {
 
 export type ConfigDirSource =
   | 'process env'
-  | 'workspace settings (terminal)'
-  | 'workspace settings (sidebar)'
+  | 'settings (terminal)'
+  | 'settings (sidebar)'
   | 'default';
 
 /**
@@ -435,11 +435,17 @@ const VERDICT_RANK: Record<Verdict, number> = {
 // ---------------------------------------------------------------------------
 
 /**
- * We read `.vscode/settings.json` off disk rather than through
+ * What the *folder* declares, read off disk rather than through
  * `workspace.getConfiguration`, because `claudeCode.environmentVariables` is
  * declared machine-scoped: VS Code hides workspace-level values for such
  * settings from the configuration API, so the API cannot tell us whether the
  * file declares one.
+ *
+ * This is deliberately not the effective value. A folder file is one of three
+ * layers VS Code merges — user, profile, folder — and it sees neither of the
+ * first two. `ReadOptions.effectiveTerminalEnv` / `effectiveSidebarEnv` carry
+ * the merged answer; these fields exist to report what the folder asked for,
+ * and to notice when VS Code is ignoring it.
  */
 export type WorkspaceEnvOverrides =
   | { kind: 'absent'; file: null; terminalEnv: Record<string, string>; sidebarEnv: Record<string, string> }
@@ -664,6 +670,17 @@ export interface ReadOptions {
    * hands the Claude Code sidebar.
    */
   effectiveSidebarEnv?: Record<string, string>;
+  /**
+   * The `terminal.integrated.env.<platform>` value as the configuration API
+   * reports it, which is the merge of user, profile and folder settings — the
+   * same merge VS Code applies when it spawns an integrated terminal.
+   *
+   * Without this we saw only the folder file, so a CLAUDE_CONFIG_DIR set in the
+   * active *profile* was invisible and the Terminal row fell through to the
+   * extension host's environment, which never has it. That reported the wrong
+   * account for the one consumer the user is actually typing into.
+   */
+  effectiveTerminalEnv?: Record<string, string>;
   /** Whether the Claude Code extension is installed at all. */
   claudeCodeInstalled?: boolean;
 }
@@ -675,7 +692,10 @@ export function readWindowState(
   const overrides = readWorkspaceEnvOverrides(workspaceRoot);
   const processConfigDir = process.env[CONFIG_DIR_VAR]?.trim() || undefined;
 
-  const terminalDir = overrides.terminalEnv[CONFIG_DIR_VAR];
+  // What each consumer will actually get, which is the configuration API's
+  // merge when we have it, and the folder file alone when we do not.
+  const terminalEnv = options.effectiveTerminalEnv ?? overrides.terminalEnv;
+  const terminalDir = terminalEnv[CONFIG_DIR_VAR];
   const declaredSidebarDir = overrides.sidebarEnv[CONFIG_DIR_VAR];
   // Prefer what VS Code actually resolves for the sidebar over what the file
   // declares; a machine-scoped setting declared at workspace level may be ignored.
@@ -684,10 +704,10 @@ export function readWindowState(
 
   const processSnapshot = snapshotFor(processConfigDir, 'process env', workspaceRoot);
   const terminalSnapshot = terminalDir
-    ? snapshotFor(terminalDir, 'workspace settings (terminal)', workspaceRoot)
+    ? snapshotFor(terminalDir, 'settings (terminal)', workspaceRoot)
     : snapshotFor(processConfigDir, 'process env', workspaceRoot);
   const sidebarSnapshot = sidebarDir
-    ? snapshotFor(sidebarDir, 'workspace settings (sidebar)', workspaceRoot)
+    ? snapshotFor(sidebarDir, 'settings (sidebar)', workspaceRoot)
     : snapshotFor(processConfigDir, 'process env', workspaceRoot);
 
   const declaredButIgnored =
@@ -698,10 +718,12 @@ export function readWindowState(
       kind: 'terminal',
       name: 'Terminal',
       snapshot: terminalSnapshot,
-      env: overrides.terminalEnv,
-      caveat: terminalDir
-        ? undefined
-        : 'No terminal.integrated.env override — inherits the process environment.',
+      env: terminalEnv,
+      caveat: !terminalDir
+        ? 'No terminal.integrated.env override — inherits the process environment.'
+        : overrides.terminalEnv[CONFIG_DIR_VAR] === undefined
+          ? `From your user or profile settings, not this folder — VS Code merges all three and hands the terminal ${terminalDir}.`
+          : undefined,
     },
     {
       kind: 'sidebar',
@@ -747,7 +769,8 @@ export function readWindowState(
     settingsProblems: apiKeys.problems,
     expectedAccount: options.expectedAccount,
     expectedAccountSource: options.expectedAccountSource,
-    isolated: terminalDir !== undefined || declaredSidebarDir !== undefined,
+    isolated:
+      overrides.terminalEnv[CONFIG_DIR_VAR] !== undefined || declaredSidebarDir !== undefined,
     settingsTracking: workspaceRoot
       ? trackingState(path.join(workspaceRoot, '.vscode', 'settings.json'))
       : 'untracked',
@@ -878,7 +901,7 @@ export function auditProjects(projectsRoot: string): ProjectAudit[] {
       name: entry.name,
       root,
       // Resolve relative to the audited project, not the current one.
-      snapshot: readAccount(expandHome(declared, root), 'workspace settings (terminal)'),
+      snapshot: readAccount(expandHome(declared, root), 'settings (terminal)'),
       sharesWith: [],
     });
   }
@@ -937,7 +960,7 @@ export function discoverStores(
   try {
     for (const entry of fs.readdirSync(os.homedir(), { withFileTypes: true })) {
       if (entry.isDirectory() && /^\.claude[-_]/.test(entry.name)) {
-        add(readAccount(path.join(os.homedir(), entry.name), 'workspace settings (terminal)'));
+        add(readAccount(path.join(os.homedir(), entry.name), 'settings (terminal)'));
       }
     }
   } catch {
