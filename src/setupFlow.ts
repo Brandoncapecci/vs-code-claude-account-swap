@@ -6,7 +6,9 @@ import {
   AccountSnapshot,
   CONFIG_DIR_VAR,
   DEFAULT_CONFIG_DIR,
+  DuplicateGroup,
   PLATFORM_KEY,
+  StoreInfo,
   WindowState,
   WriteTarget,
   auditProjects,
@@ -17,6 +19,7 @@ import {
   isExplicitDir,
   isLoggedIn,
   isVerified,
+  logoutWithCli,
   normalizeEnvBlock,
   primaryConsumer,
   readWorkspaceEnvOverrides,
@@ -32,6 +35,9 @@ import { TrackingState, setSkipWorktree, wouldDirtyRepo } from './gitTracking';
 import { setPin } from './pinStore';
 
 const TERMINAL_NAME = 'Claude Login';
+
+/** What may be passed to `claude auth login --email` as a bare argument. */
+const EMAIL_ARGUMENT = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 
 /**
  * The per-project setup flow.
@@ -77,6 +83,19 @@ export function openClaudeTerminal(
   return terminal;
 }
 
+export interface LoginOptions {
+  /** Pinned account, shown while waiting so the user knows which to pick. */
+  expected?: string;
+  /**
+   * The account already in this store. Set it to sign out first and to keep
+   * waiting until the email actually changes — without it, replacing a login
+   * would "succeed" the instant the CLI reported the old one.
+   */
+  replacing?: string;
+  /** Pre-fills the email on the login page, via `claude auth login --email`. */
+  emailHint?: string;
+}
+
 /**
  * Run `claude auth login` for a store and wait until the CLI reports an account.
  * Resolves with the signed-in email, or undefined if cancelled or timed out.
@@ -84,9 +103,19 @@ export function openClaudeTerminal(
 export async function loginAndAwait(
   configDir: string | undefined,
   cwd: string | undefined,
-  expected?: string
+  options: LoginOptions = {}
 ): Promise<string | undefined> {
-  openClaudeTerminal(configDir, cwd, 'claude auth login');
+  const { expected, replacing, emailHint } = options;
+  // Sign the old account out first, so the CLI cannot answer the poll below
+  // with the login that is being replaced. Done off the terminal, which keeps
+  // the visible command to a single portable one.
+  if (replacing) {
+    await logoutWithCli(claudePath(), configDir, cwd);
+  }
+  // Checked here as well as at the prompt: this string is appended to a command
+  // line, and a caller is not the right place to rely on for that.
+  const hint = emailHint && EMAIL_ARGUMENT.test(emailHint) ? emailHint : undefined;
+  openClaudeTerminal(configDir, cwd, `claude auth login${hint ? ` --email ${hint}` : ''}`);
 
   const label = configDir ? tilde(configDir) : 'the default store';
   return vscode.window.withProgress(
@@ -105,8 +134,9 @@ export async function loginAndAwait(
           return undefined;
         }
         const result = await verifyWithCli(claudePath(), configDir, {}, cwd);
-        if (result.status?.loggedIn && result.status.email) {
-          return result.status.email;
+        const email = result.status?.loggedIn ? result.status.email : undefined;
+        if (email && email.toLowerCase() !== replacing?.toLowerCase()) {
+          return email;
         }
       }
       return undefined;
@@ -118,6 +148,18 @@ export async function loginAndAwait(
 // Account picking
 // ---------------------------------------------------------------------------
 
+/**
+ * Every store on the machine, scanning only if the state predates the scan.
+ *
+ * `loadWindowState` fills this in, so the common path reuses one home-directory
+ * read rather than repeating it per quick pick.
+ */
+function storesOf(state: WindowState): StoreInfo[] {
+  return state.stores.length > 0
+    ? state.stores
+    : discoverStores(state, projectsRoot(state.workspaceRoot));
+}
+
 interface StoreChoice extends vscode.QuickPickItem {
   action: 'use' | 'new' | 'manual';
   configDir?: string;
@@ -126,7 +168,7 @@ interface StoreChoice extends vscode.QuickPickItem {
 }
 
 function storeChoices(state: WindowState): StoreChoice[] {
-  const stores = discoverStores(state, projectsRoot(state.workspaceRoot));
+  const stores = storesOf(state);
 
   const items: StoreChoice[] = stores
     .filter(store => isLoggedIn(store.snapshot) || effectiveEmail(store.snapshot))
@@ -285,9 +327,12 @@ async function pickFolder(): Promise<vscode.WorkspaceFolder | undefined> {
 }
 
 /** Ask for a label and turn it into a new `~/.claude-<label>` store. */
-async function promptForNewStore(folderName: string, state: WindowState): Promise<string | undefined> {
+async function promptForNewStore(
+  folderName: string | undefined,
+  state: WindowState
+): Promise<string | undefined> {
   const taken = new Set(
-    discoverStores(state, projectsRoot(state.workspaceRoot))
+    storesOf(state)
       .map(store => store.configDir)
       .filter((dir): dir is string => dir !== undefined)
   );
@@ -295,7 +340,7 @@ async function promptForNewStore(folderName: string, state: WindowState): Promis
   const label = await vscode.window.showInputBox({
     title: 'Name this account',
     prompt: `A short label for the account, not an email. The credential store will be ~/.claude-<label>.`,
-    value: slugify(folderName),
+    value: folderName ? slugify(folderName) : '',
     placeHolder: 'work',
     validateInput: value => {
       const slug = slugify(value ?? '');
@@ -492,7 +537,7 @@ async function applyStore(input: {
 
   // Sign in when the chosen store has no account yet.
   if (!email) {
-    email = await loginAndAwait(configDir, folderPath, state.expectedAccount);
+    email = await loginAndAwait(configDir, folderPath, { expected: state.expectedAccount });
     if (!email) {
       onDone();
       void vscode.window.showWarningMessage(
@@ -538,19 +583,29 @@ export async function runSwitchAccount(onDone: () => void): Promise<void> {
   const current = primaryConsumer(state).snapshot;
   const currentDir = isExplicitDir(current.source) ? current.configDir : undefined;
 
-  const stores = discoverStores(state, projectsRoot(state.workspaceRoot))
+  const stores = storesOf(state)
     .filter(store => effectiveEmail(store.snapshot))
     .sort((a, b) => (effectiveEmail(a.snapshot) ?? '').localeCompare(effectiveEmail(b.snapshot) ?? ''));
 
   const items: (vscode.QuickPickItem & { configDir?: string; email?: string; setup?: true })[] =
     stores.map(store => {
       const inUse = store.configDir === currentDir;
+      // Two stores on one account otherwise appear here as two identical rows,
+      // which is the exact confusion the duplicate row exists to end.
+      const shared = state.duplicateStores.find(group =>
+        group.stores.some(other => sameStore(other.configDir, store.configDir))
+      );
       return {
         label: `${inUse ? '$(check)' : '$(account)'} ${effectiveEmail(store.snapshot)}`,
         description: [effectiveOrg(store.snapshot), inUse ? 'current' : undefined]
           .filter(Boolean)
           .join(' · '),
-        detail: storeLabel(store.snapshot),
+        detail: shared
+          ? `${storeLabel(store.snapshot)} — same account as ${shared.stores
+              .filter(other => !sameStore(other.configDir, store.configDir))
+              .map(other => storeLabel(other.snapshot))
+              .join(', ')}`
+          : storeLabel(store.snapshot),
         configDir: store.configDir,
         email: effectiveEmail(store.snapshot) ?? undefined,
       };
@@ -637,7 +692,7 @@ export async function runFixSidebar(onDone: () => void): Promise<void> {
     label: `$(versions) Use ${account} in this project only — keep the native panel`,
     description: 'more setup',
     detail:
-      'Copies your profile into one used only by this folder. Trade-off: a profile keeps its own extension list, so extensions you install later apply to one profile at a time, and you maintain two.',
+      'Copies your profile into one used only by this folder. Trade-off: a profile keeps its own extension list unless you share it, so an extension updated later can be left behind in one profile.',
     action: 'profile' as const,
   };
 
@@ -751,7 +806,9 @@ async function runProfileRoute(
       detail:
         'Your current profile — extensions, theme and settings — is copied into a new one used only by this folder, and this window switches to it. ' +
         `${account} is applied automatically once it does.\n\n` +
-        'Name the profile in the editor that opens, then choose Create. Note that a profile keeps its own extension list, so extensions you install later apply to one profile at a time.',
+        'Name the profile in the editor that opens, then choose Create.\n\n' +
+        'One thing to know: the copy includes the extension list, and from then on the two lists are separate. An extension you update later lands in one profile and stays at the old version in the other, silently. ' +
+        'To keep one extension shared everywhere, right-click it in the Extensions view and choose "Apply Extension to all Profiles" — or, in the profile editor, have the new profile use the default profile\'s extensions instead of a copy.',
     },
     'Continue'
   );
@@ -812,7 +869,9 @@ export async function consumeProfileHandoff(onDone: () => void): Promise<void> {
 
   onDone();
   const choice = await vscode.window.showInformationMessage(
-    `This window's "${handoff.profileName}" profile now uses ${handoff.account ?? 'the selected account'}${
+    // Unnamed on purpose: the editor's own UI collects the profile name and no
+    // API reports it back, so naming it here could only ever be a guess.
+    `This window's new profile now uses ${handoff.account ?? 'the selected account'}${
       handoff.configDir ? ` (${tilde(handoff.configDir)})` : ''
     }. Other projects are unaffected. Reload to apply it to the Claude Code panel.`,
     'Reload Window',
@@ -871,3 +930,337 @@ export function loginTarget(snapshot: AccountSnapshot): string | undefined {
 }
 
 export { CONFIG_DIR_VAR };
+
+// ---------------------------------------------------------------------------
+// Adding an account, and undoing two stores that hold one
+// ---------------------------------------------------------------------------
+
+/** Whether two store references mean the same store, unset included. */
+function sameStore(a: string | undefined, b: string | undefined): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  return path.resolve(a) === path.resolve(b);
+}
+
+/** The duplicate group a store now belongs to, if signing in created one. */
+function duplicateGroupFor(
+  state: WindowState,
+  configDir: string | undefined
+): DuplicateGroup | undefined {
+  return state.duplicateStores.find(group =>
+    group.stores.some(store => sameStore(store.configDir, configDir))
+  );
+}
+
+/**
+ * Ask which account a sign-in should target.
+ *
+ * Undefined means cancel; an empty string means "let me choose in the browser",
+ * which an input box distinguishes — Escape returns undefined, Enter on an
+ * empty field returns "".
+ */
+async function askEmailHint(store: string): Promise<string | undefined> {
+  const value = await vscode.window.showInputBox({
+    title: `Which account should ${store} use?`,
+    prompt:
+      'Optional. Pre-fills the email on the login page, so the browser is less likely to sign you straight back in as the account you already have. Leave empty to choose in the browser.',
+    placeHolder: 'you@work.com',
+    // The value is appended to a command line, so restrict it to what an email
+    // is made of rather than quote it: quoting is shell-specific, and single
+    // quotes reach `cmd.exe` as part of the address.
+    validateInput: value =>
+      !value || EMAIL_ARGUMENT.test(value.trim())
+        ? undefined
+        : 'Enter a plain email address, or leave it empty to choose in the browser.',
+  });
+  return value === undefined ? undefined : value.trim();
+}
+
+
+/**
+ * Sign a store in, and refuse to call it done when the account that arrives is
+ * one another store already holds.
+ *
+ * This is the check the extension was missing. A second sign-in lands on the
+ * claude.ai session already open in the browser and completes without a word,
+ * leaving two stores that look isolated and are not — so the sign-in is not
+ * finished until we have looked at what actually came back.
+ */
+async function signInAndConfirm(
+  configDir: string | undefined,
+  cwd: string | undefined,
+  options: LoginOptions = {}
+): Promise<string | undefined> {
+  let attempt: LoginOptions = options;
+
+  for (;;) {
+    const email = await loginAndAwait(configDir, cwd, attempt);
+    if (!email) {
+      return undefined;
+    }
+
+    // Re-read rather than reason about it: this is the same detection the tree
+    // row uses, so the two can never disagree about what counts as a duplicate.
+    const group = duplicateGroupFor(await loadWindowState(), configDir);
+    if (!group) {
+      return email;
+    }
+
+    const others = group.stores
+      .filter(store => !sameStore(store.configDir, configDir))
+      .map(store => storeLabel(store.snapshot));
+    const choice = await vscode.window.showWarningMessage(
+      `That signed in as ${email} — the account ${others.join(' and ')} already ${
+        others.length === 1 ? 'uses' : 'use'
+      }.`,
+      {
+        modal: true,
+        detail:
+          'Two stores holding one login are not isolated: whichever project you open, it is the same account.\n\n' +
+          'The browser almost certainly reused the claude.ai session you already had. Sign out of claude.ai, or use a private window, and try again.',
+      },
+      'Sign In Again',
+      'Keep It'
+    );
+    if (choice !== 'Sign In Again') {
+      return email; // Including Escape: the login happened, so report it honestly.
+    }
+
+    const hint = await askEmailHint(configDir ? tilde(configDir) : 'the default store');
+    if (hint === undefined) {
+      return email;
+    }
+    attempt = { ...options, replacing: email, emailHint: hint || undefined };
+  }
+}
+
+/**
+ * `Add Account` — create a store, sign into it, confirm it is a new account.
+ *
+ * Deliberately not per-project: an account is a machine-level thing that any
+ * number of projects then point at, and requiring an open folder to add one
+ * was the reason signing in ever needed a "which store?" question of its own.
+ */
+export async function runAddAccount(onDone: () => void): Promise<void> {
+  const state = await loadWindowState();
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  const folderPath = folder?.uri.fsPath;
+
+  const configDir = await promptForNewStore(undefined, state);
+  if (!configDir) {
+    return;
+  }
+
+  const email = await signInAndConfirm(configDir, folderPath, {});
+  onDone();
+  if (!email) {
+    void vscode.window.showWarningMessage(
+      `Created ${tilde(configDir)}, but no sign-in was detected. Run "Claude Account: Re-read Now" once login finishes.`
+    );
+    return;
+  }
+
+  if (!folderPath) {
+    void vscode.window.showInformationMessage(
+      `${tilde(configDir)} is signed in as ${email}. Open a folder to use it there.`
+    );
+    return;
+  }
+
+  const folderName = path.basename(folderPath);
+  const choice = await vscode.window.showInformationMessage(
+    `${tilde(configDir)} is signed in as ${email}.`,
+    `Use It For "${folderName}"`,
+    'Not Now'
+  );
+  if (choice !== `Use It For "${folderName}"`) {
+    return;
+  }
+
+  await applyStore({
+    folderPath,
+    folderName,
+    state: await loadWindowState(),
+    configDir,
+    email,
+    onDone,
+  });
+}
+
+/**
+ * Sign in to one named store — the row's action, never a free-floating command.
+ *
+ * Without a store to act on this would have to ask which one, which is the
+ * question that made the old top-level "Log In…" useless: two rows, the same
+ * email on both, and no way to tell which you meant.
+ */
+export async function runSignInToStore(
+  target: { configDir: string | undefined; label: string; email?: string } | undefined,
+  onDone: () => void
+): Promise<void> {
+  const state = await loadWindowState();
+  const snapshot = primaryConsumer(state).snapshot;
+  const store = target ?? {
+    configDir: loginTarget(snapshot),
+    label: storeLabel(snapshot),
+    email: effectiveEmail(snapshot),
+  };
+
+  // A store that already holds an account gives "sign in" two meanings, and
+  // they need opposite handling: renewing an expired session ends on the same
+  // email, so there is nothing to watch for, while changing accounts has to
+  // sign out first and is only finished once a different email comes back.
+  if (store.email) {
+    await signInOverExisting(store, state, onDone);
+    return;
+  }
+
+  const email = await signInAndConfirm(store.configDir, state.workspaceRoot, {
+    expected: state.expectedAccount,
+  });
+  onDone();
+  void (email
+    ? vscode.window.showInformationMessage(`${store.label} is signed in as ${email}.`)
+    : vscode.window.showWarningMessage(
+        `No sign-in was detected for ${store.label}. Run "Claude Account: Re-read Now" once login finishes.`
+      ));
+}
+
+async function signInOverExisting(
+  store: { configDir: string | undefined; label: string; email?: string },
+  state: WindowState,
+  onDone: () => void
+): Promise<void> {
+  const same = 'Sign In As The Same Account';
+  const other = 'Sign In As A Different Account';
+  const choice = await vscode.window.showInformationMessage(
+    `${store.label} is already signed in as ${store.email}.`,
+    {
+      modal: true,
+      detail:
+        `Signing in as the same account renews this session and changes nothing else.\n\n` +
+        `Signing in as a different one signs ${store.email} out of this store first — every project pointed at it moves to the new account.`,
+    },
+    same,
+    other
+  );
+  if (!choice) {
+    return;
+  }
+
+  if (choice === same) {
+    // Nothing observable changes — same store, same email — so there is no
+    // state to poll on, and claiming to have waited for one would be a lie.
+    openClaudeTerminal(store.configDir, state.workspaceRoot, 'claude auth login');
+    void vscode.window.showInformationMessage(
+      `Signing in to ${store.label} as ${store.email}. Use "Claude Account: Re-read Now" if the view does not update when it finishes.`
+    );
+    return;
+  }
+
+  const hint = await askEmailHint(store.label);
+  if (hint === undefined) {
+    return;
+  }
+  const email = await signInAndConfirm(store.configDir, state.workspaceRoot, {
+    replacing: store.email,
+    emailHint: hint || undefined,
+  });
+  onDone();
+  void (email
+    ? vscode.window.showInformationMessage(`${store.label} is now signed in as ${email}.`)
+    : // The sign-out already happened, so silence here would leave a store
+      // logged out with nothing on screen saying so.
+      vscode.window.showWarningMessage(
+        `${store.label} was signed out of ${store.email}, and no new sign-in was detected. Finish the login in the terminal, or sign in again.`
+      ));
+}
+
+/**
+ * Sign one of the stores that share an account in as a different one.
+ *
+ * The row this hangs off already says which stores collide, so the only open
+ * question is which of them should change — and that is a real choice: the one
+ * to re-sign is whichever is used by the projects that should move.
+ */
+export async function runFixDuplicateAccount(
+  group: DuplicateGroup | undefined,
+  onDone: () => void
+): Promise<void> {
+  const state = await loadWindowState();
+  const target = group ?? state.duplicateStores[0];
+  if (!target) {
+    void vscode.window.showInformationMessage('No two stores are sharing an account.');
+    return;
+  }
+
+  const picked = await vscode.window.showQuickPick(
+    target.stores.map(store => ({
+      label: storeLabel(store.snapshot),
+      description:
+        store.usedBy.length > 0 ? `used by ${store.usedBy.join(', ')}` : 'not used by any project',
+      detail:
+        store.configDir === undefined
+          ? 'The store every project without an override shares — usually the one to leave alone'
+          : undefined,
+      store,
+    })),
+    {
+      title: `All of these are signed in as ${target.email ?? 'one account'}`,
+      placeHolder: 'Which store should be signed in as a different account?',
+      matchOnDetail: true,
+    }
+  );
+  if (!picked) {
+    return;
+  }
+
+  const hint = await askEmailHint(picked.label);
+  if (hint === undefined) {
+    return;
+  }
+
+  // The group's email is the *first* store's, and members can hold different
+  // emails — a UUID match survives a rename. Replacing what this store actually
+  // holds is what makes "wait for a different account" mean anything.
+  const email = await signInAndConfirm(picked.store.configDir, state.workspaceRoot, {
+    replacing: effectiveEmail(picked.store.snapshot),
+    emailHint: hint || undefined,
+  });
+  onDone();
+  void (email
+    ? vscode.window.showInformationMessage(`${picked.label} is now signed in as ${email}.`)
+    : vscode.window.showWarningMessage(
+        `${picked.label} was signed out, and no new sign-in was detected. Finish the login in the terminal, or sign in again.`
+      ));
+}
+
+/** Log out of one named store. Falls back to the account this window uses. */
+export async function runLogout(
+  target: { configDir: string | undefined; label: string; email?: string } | undefined,
+  onDone: () => void
+): Promise<void> {
+  const state = await loadWindowState();
+  const snapshot = primaryConsumer(state).snapshot;
+  const store = target ?? {
+    configDir: loginTarget(snapshot),
+    label: storeLabel(snapshot),
+    email: effectiveEmail(snapshot),
+  };
+
+  const confirmed = await vscode.window.showWarningMessage(
+    `Log out ${store.email ?? 'this account'} from ${store.label}?`,
+    {
+      modal: true,
+      detail: 'Every project pointed at this store is signed out until you sign in again.',
+    },
+    'Log Out'
+  );
+  if (confirmed !== 'Log Out') {
+    return;
+  }
+
+  openClaudeTerminal(store.configDir, state.workspaceRoot, 'claude auth logout');
+  onDone();
+}

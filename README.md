@@ -10,7 +10,7 @@ This extension never caches. Every read runs `claude auth status --json` for eac
 
 ## Set up a project in two clicks
 
-Click the 🔑 in the **Claude Account** view title, or the **Not isolated** row, and run **Use a Specific Account For This Project**:
+Click the **Not isolated** row, or run **Use a Specific Account For This Project** from the `…` menu in the **Claude Account** view title:
 
 1. **Pick an account** from a list of every account already signed in on this machine — no typing.
    ```
@@ -48,6 +48,7 @@ Anything read from disk rather than confirmed live is always labelled `(unverifi
 - **Who uses what** — the terminal, the Claude Code sidebar, and this extension host resolve `CLAUDE_CONFIG_DIR` independently; each is verified separately and flagged when they disagree.
 - **Account overrides** — API keys in the environment or in any `settings.json` `env` block, plus settings files that failed to parse.
 - **Projects** — scans sibling folders and flags any two pointing at the same store, since those share one login.
+- **Two stores, one account** — flags credential stores that are separate on disk but signed in as the same account, which is isolation that only looks real.
 
 ## Shared repos: keeping your account out of git
 
@@ -65,19 +66,38 @@ For a shared repo that needs a non-default account, the cleanest option remains 
 
 Note that user settings alone cannot give two projects two different accounts — they apply everywhere. The workable pattern is *user settings for the account you use most, per-folder overrides for the exceptions.*
 
-## Two traps it detects
+## Three traps it detects
+
+**Two stores can hold one login.** Separate directories, separate Keychain entries, separate settings, each project pinned to its own — and the same account behind all of them, so nothing is actually isolated. It is the *default* outcome of signing the second store in, because the browser reuses the claude.ai session you already have and the sign-in completes without a word. Nothing else in the setup looks wrong, which is why it can survive for months.
+
+The extension compares the `accountUuid` in each store, falling back to email and organization for stores that predate it, and says so on a row of its own. One person with two organizations is a genuine reason to run two stores, so the organization is part of the comparison and that case is left alone. `Add Account` runs the same check on the account that comes back and will not quietly finish on a duplicate.
 
 **`CLAUDE_CONFIG_DIR=~/.claude` is not the same as leaving it unset**, even though `~/.claude` is the default directory. An explicit value selects a store at `~/.claude/.claude.json`; unset uses the legacy `~/.claude.json`. Verified: `claude auth status` reports a logged-in account with the variable unset and none with it set to `~/.claude`. A project configured that way looks mysteriously logged out.
 
 **`claudeCode.environmentVariables` is machine-scoped.** VS Code ignores a workspace-level value outright — the settings editor says so on hover — which leaves the native panel on a different account from the terminal in the same window. The extension compares what your file declares against what the configuration API actually reports, and names the store the panel will really use.
+
+This is also why an editor profile is the *only* way to give the native panel a per-project account. Claude Code v2.1.270 contributes exactly two settings that can redirect the credential store, `claudeCode.environmentVariables` and `claudeCode.claudeProcessWrapper`, and both are `machine`-scoped — a scope VS Code honours in user and profile settings and nowhere else. `claudeCode.useTerminal` is `window`-scoped, which is what makes the terminal route settable per folder. Two other candidates are ruled out by testing: an `env` block in `.claude/settings.local.json` cannot set `CLAUDE_CONFIG_DIR`, because the store is resolved before those settings are read, and the process environment belongs to the whole editor instance rather than to a project.
 
 **Fix Sidebar Account** offers the only three routes that exist, with their trade-offs stated:
 
 | Route | Scope | Trade-off |
 |---|---|---|
 | **Terminal** *(recommended)* | this project | Claude opens as a terminal here rather than the native panel. One workspace setting, nothing else changes. |
-| **Own editor profile** | this project | Keeps the native panel, but a profile has its own extension list — extensions you install later apply to one profile at a time, and you maintain two. |
+| **Own editor profile** | this project | Keeps the native panel. A profile copies your extension list rather than sharing it, so the two drift unless you say otherwise — see below. |
 | **User settings** | every project | The only scope the setting is honored in, so it is all-or-nothing. Always asks first, naming the projects it would break. |
+
+### If you take the profile route, share your extensions
+
+A new profile copies the extension list it was created from, and from then on the two are independent. An extension you update later lands in the profile you were in and stays at the old version in the other, with nothing on screen saying so — `--install-extension` writes to the default profile, and a window running under another profile never sees it. Installing into a specific one takes `--profile`:
+
+```sh
+cursor --profile "Claude Work" --install-extension my-extension.vsix --force
+```
+
+Two ways to avoid the split instead of managing it:
+
+- **Per extension** — right-click it in the Extensions view and choose **Apply Extension to all Profiles**. It becomes application-scoped and one copy serves every profile.
+- **Per profile** — in the profile editor, have the new profile use the *default profile's* extensions rather than a copy. Profiles inherit per category (settings, keybindings, snippets, tasks, extensions), so it can keep its own settings — which is all the account override needs — while sharing one extension list.
 
 ## Settings
 
@@ -96,21 +116,27 @@ Note that user settings alone cannot give two projects two different accounts �
 
 All under the **Claude Account** category.
 
+Two verbs cover the everyday work: **Switch Account** picks from the accounts you have, **Add Account** creates one. Signing in and out are consequences of those, not menu items of their own — a bare `Log In…` has to open by asking *which credential store?*, which is a question about plumbing, and one nobody can answer from a list of stores showing the same email twice.
+
 | Command | Description |
 |---------|-------------|
-| `Use a Specific Account For This Project` | The setup flow: pick an account, write the settings, log in if needed, pin the result. |
+| `Switch Account` | Point this folder at another account you already have. One pick, no setup questions. |
+| `Add Account` | Name it, create `~/.claude-<label>`, sign in, and **confirm the account that arrives is a new one**. Then offers to use it here. |
+| `Use a Specific Account For This Project` | The full setup flow: pick an account, write the settings, log in if needed, pin the result. |
 | `Pin Expected Account` | Change only what to expect, without changing which store the folder uses. |
 | `Re-read Now` | Force a fresh read and re-verify. |
-| `Show Details` | Full report, including the raw CLI JSON and a per-consumer verdict table. |
-| `Log In…` / `Log Out…` | Run `claude auth login` / `logout` against the correct store. |
+| `Show Details` | Full report: the raw CLI JSON, a per-consumer verdict table, and every account on the machine. |
+| `Fix Two Stores Sharing One Account` | Sign one of the colliding stores in as a different account. |
+| `Sign In` / `Log Out…` | Act on one named store. On the tree row for that store, so there is never a "which one?" prompt. |
 
 ## How it works
 
 1. Reads `.vscode/settings.json` off disk, because a machine-scoped setting's workspace value is hidden from the configuration API — then compares it against what the API reports, to detect a value VS Code is ignoring
 2. Resolves `CLAUDE_CONFIG_DIR` separately for the terminal, the sidebar, and this extension host, expanding `~`, `${workspaceFolder}`, `${userHome}` and `${env:VAR}` the way VS Code does
 3. Runs `claude auth status --json` per distinct store, omitting the variable entirely where nothing set it
-4. Falls back to `oauthAccount` in `<store>/.claude.json` if the CLI is unavailable — and says so rather than implying the result is verified
-5. Writes settings with `jsonc-parser`, splicing exact ranges so comments, key order, and unrelated settings survive; refuses to write to a file that does not parse
+4. Compares the `accountUuid` behind every store it can find, so two stores holding one login are named rather than left to look healthy
+5. Falls back to `oauthAccount` in `<store>/.claude.json` if the CLI is unavailable — and says so rather than implying the result is verified
+6. Writes settings with `jsonc-parser`, splicing exact ranges so comments, key order, and unrelated settings survive; refuses to write to a file that does not parse
 
 ## Development
 
@@ -125,7 +151,8 @@ npm run compile     # or: npm run watch
 |---|---|
 | `accountReader.ts` | Stores, CLI verification, verdicts. No `vscode` import, so it runs under plain node. |
 | `settingsIo.ts` | Surgical `.vscode/settings.json` writes. |
-| `setupFlow.ts` | The per-project setup and login flow. |
+| `setupFlow.ts` | Setup, switching, adding an account, and the sign-in flows. |
+| `profileHandoff.ts` | Carries intent across the window that a new editor profile opens in. |
 | `verdictCopy.ts` | One exhaustive switch for every verdict's wording and colour. |
 | `accountProvider.ts` | Tree view, load coalescing, file watching. |
 | `statusBar.ts`, `detailsReport.ts`, `commands.ts` | Presentation surfaces and command wiring. |

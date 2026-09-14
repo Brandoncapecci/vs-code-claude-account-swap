@@ -100,7 +100,7 @@ export class StatusBar implements vscode.Disposable {
       : verdict === 'api-key'
       ? ['Show Details', "Don't Show Again"]
       : state.isolated
-        ? ['Log In…', 'Show Details', "Don't Show Again"]
+        ? ['Sign In…', 'Show Details', "Don't Show Again"]
         : ['Use a Different Account Here', 'Show Details', "Don't Show Again"];
 
     const choice = isSecondary || verdict === 'api-key'
@@ -108,8 +108,8 @@ export class StatusBar implements vscode.Disposable {
       : await vscode.window.showErrorMessage(message, ...actions);
 
     switch (choice) {
-      case 'Log In…':
-        await vscode.commands.executeCommand('claudeAccount.login');
+      case 'Sign In…':
+        await vscode.commands.executeCommand('claudeAccount.signInToStore');
         break;
       case 'Use a Different Account Here':
         await vscode.commands.executeCommand('claudeAccount.useAccountForThisProject');

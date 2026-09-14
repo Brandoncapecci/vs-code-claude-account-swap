@@ -1,9 +1,9 @@
 {
   "name": "claude-account",
   "displayName": "Claude Account",
-  "description": "Pin a Claude Code account per project and see, live, whether you are on the right one",
+  "description": "Keep your Claude Code accounts separate: switch between them, add new ones, and see live whether this project is on the right one",
   "publisher": "Brandoncapecci",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -100,6 +100,12 @@
         "icon": "$(arrow-swap)"
       },
       {
+        "command": "claudeAccount.addAccount",
+        "title": "Add Account",
+        "category": "Claude Account",
+        "icon": "$(add)"
+      },
+      {
         "command": "claudeAccount.useAccountForThisProject",
         "title": "Use a Specific Account For This Project",
         "category": "Claude Account",
@@ -110,6 +116,12 @@
         "title": "Fix Sidebar Account",
         "category": "Claude Account",
         "icon": "$(tools)"
+      },
+      {
+        "command": "claudeAccount.fixDuplicateAccount",
+        "title": "Fix Two Stores Sharing One Account",
+        "category": "Claude Account",
+        "icon": "$(warning)"
       },
       {
         "command": "claudeAccount.setExpectedAccount",
@@ -129,14 +141,14 @@
         "category": "Claude Account"
       },
       {
-        "command": "claudeAccount.login",
-        "title": "Log In\u2026",
+        "command": "claudeAccount.signInToStore",
+        "title": "Sign In",
         "category": "Claude Account",
         "icon": "$(sign-in)"
       },
       {
         "command": "claudeAccount.logout",
-        "title": "Log Out\u2026",
+        "title": "Log Out…",
         "category": "Claude Account",
         "icon": "$(sign-out)"
       },
@@ -161,7 +173,7 @@
           "group": "navigation@0"
         },
         {
-          "command": "claudeAccount.useAccountForThisProject",
+          "command": "claudeAccount.addAccount",
           "when": "view == claudeAccountView",
           "group": "navigation@1"
         },
@@ -171,19 +183,14 @@
           "group": "navigation@2"
         },
         {
-          "command": "claudeAccount.login",
+          "command": "claudeAccount.useAccountForThisProject",
           "when": "view == claudeAccountView",
           "group": "1_auth@1"
         },
         {
-          "command": "claudeAccount.logout",
-          "when": "view == claudeAccountView",
-          "group": "1_auth@2"
-        },
-        {
           "command": "claudeAccount.fixSidebar",
           "when": "view == claudeAccountView",
-          "group": "1_auth@3"
+          "group": "1_auth@2"
         },
         {
           "command": "claudeAccount.setExpectedAccount",
@@ -198,6 +205,11 @@
       ],
       "view/item/context": [
         {
+          "command": "claudeAccount.signInToStore",
+          "when": "view == claudeAccountView && viewItem =~ /\\bsignedOut\\b/",
+          "group": "inline"
+        },
+        {
           "command": "claudeAccount.copyValue",
           "when": "view == claudeAccountView && viewItem =~ /\\bcopyable\\b/",
           "group": "inline"
@@ -206,6 +218,16 @@
           "command": "claudeAccount.openFile",
           "when": "view == claudeAccountView && viewItem =~ /\\bopenable\\b/",
           "group": "navigation"
+        },
+        {
+          "command": "claudeAccount.signInToStore",
+          "when": "view == claudeAccountView && viewItem =~ /\\bstore\\b/",
+          "group": "1_auth@1"
+        },
+        {
+          "command": "claudeAccount.logout",
+          "when": "view == claudeAccountView && viewItem =~ /\\bstore\\b/",
+          "group": "1_auth@2"
         }
       ],
       "commandPalette": [

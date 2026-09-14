@@ -4,6 +4,7 @@ import {
   ReadOptions,
   TerminalProfile,
   WindowState,
+  analyzeStores,
   expandHome,
   PLATFORM_KEY,
   normalizeEnvBlock,
@@ -128,9 +129,16 @@ export async function loadWindowState(): Promise<WindowState> {
     claudeCodeInstalled: vscode.extensions.getExtension(CLAUDE_CODE_EXTENSION_ID) !== undefined,
   };
 
+  const verify = config().get<boolean>('verifyWithCli', true);
   const state = readWindowState(folder, options);
-  if (config().get<boolean>('verifyWithCli', true)) {
+  if (verify) {
     await verifyWindowState(state, claudePath());
   }
+  // Scanning sibling projects is the expensive half of finding stores, and it
+  // is exactly what `scanProjects` turns off. Without it the `~/.claude-*`
+  // stores are still found, so duplicates are still caught — the listing just
+  // stops saying which projects use each one.
+  const scanRoot = config().get<boolean>('scanProjects', true) ? projectsRoot(folder) : undefined;
+  await analyzeStores(state, scanRoot, verify ? claudePath() : undefined);
   return state;
 }

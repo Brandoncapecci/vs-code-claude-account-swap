@@ -52,6 +52,33 @@ export function detailsMarkdown(state: WindowState): string {
   }
   lines.push('');
 
+  if (state.stores.length > 0) {
+    // The whole roster, not just what this window uses: "are my accounts
+    // actually separate" is a question about the machine, and it cannot be
+    // answered from the two or three stores one project happens to touch.
+    lines.push('## Accounts on this machine', '');
+    lines.push('| Store | Account | Used by |', '| --- | --- | --- |');
+    for (const store of state.stores) {
+      const shared = state.duplicateStores.find(group => group.stores.includes(store));
+      const account = effectiveEmail(store.snapshot) ?? '_not logged in_';
+      lines.push(
+        `| ${storeLabel(store.snapshot)} | ${account}${shared ? ' ⚠️' : ''} | ${
+          store.usedBy.length > 0 ? store.usedBy.join(', ') : '—'
+        } |`
+      );
+    }
+    lines.push('');
+
+    for (const group of state.duplicateStores) {
+      lines.push(
+        `⚠️ **${group.stores.map(store => storeLabel(store.snapshot)).join(' and ')} are all signed in as \`${group.email}\`.**`,
+        '',
+        'Separate stores mean separate Keychain entries, so this looks isolated — but there is one login behind all of them, and a project pinned to one is using the same account as a project pinned to another.',
+        ''
+      );
+    }
+  }
+
   const status = cliStatus(snapshot);
   if (status) {
     lines.push('## Live CLI answer', '', '```json', JSON.stringify(status, null, 2), '```', '');

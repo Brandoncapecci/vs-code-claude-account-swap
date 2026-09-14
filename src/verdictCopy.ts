@@ -112,7 +112,9 @@ function base(verdict: Verdict, ctx: VerdictContext): VerdictCopy {
         treeDescription: ctx.store,
         statusText: 'No Claude login',
         detail: `No account is signed in for ${ctx.store}.`,
-        command: 'claudeAccount.login',
+        // Signs in to the store this window uses: with no argument the command
+        // falls back to the primary consumer, which is the one this row is about.
+        command: 'claudeAccount.signInToStore',
       };
 
     case 'api-key':

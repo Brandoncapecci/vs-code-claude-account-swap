@@ -227,6 +227,45 @@ export function verifyWithCli(
   });
 }
 
+/**
+ * Sign a store out without a terminal.
+ *
+ * Chaining `logout; login` into one `sendText` would be shorter, but `;` is not
+ * a command separator in `cmd.exe`, so on a Windows default profile the whole
+ * line would reach `claude` as arguments and no sign-in would happen. Running
+ * the logout here keeps the terminal to a single portable command, and keeps a
+ * prompt from eating the line queued behind it.
+ *
+ * Resolves either way: a store that holds nothing to log out of is already in
+ * the state the caller wanted.
+ */
+export function logoutWithCli(
+  claudePath: string,
+  configDir: string | undefined,
+  cwd?: string
+): Promise<void> {
+  const childEnv: Record<string, string | undefined> = { ...process.env };
+  if (configDir === undefined) {
+    delete childEnv[CONFIG_DIR_VAR];
+  } else {
+    childEnv[CONFIG_DIR_VAR] = configDir;
+  }
+
+  return new Promise(resolve => {
+    execFile(
+      claudePath,
+      ['auth', 'logout'],
+      {
+        env: childEnv,
+        cwd: cwd && fs.existsSync(cwd) ? cwd : os.homedir(),
+        timeout: 8000,
+        maxBuffer: 1024 * 1024,
+      },
+      () => resolve()
+    );
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Account snapshot
 // ---------------------------------------------------------------------------
@@ -234,6 +273,13 @@ export function verifyWithCli(
 export interface OnDiskAccount {
   email?: string;
   organizationName?: string;
+  /**
+   * Stable identity of the account itself. The CLI does not report it, so this
+   * is the only identifier that tells one person's two organizations apart —
+   * which is what separates real isolation from two stores holding one login.
+   */
+  accountUuid?: string;
+  organizationUuid?: string;
 }
 
 export type ConfigDirSource =
@@ -298,6 +344,9 @@ export function readAccount(configDir: string, source: ConfigDirSource): Account
         snapshot.account = {
           email: oauth.emailAddress,
           organizationName: oauth.organizationName,
+          accountUuid: typeof oauth.accountUuid === 'string' ? oauth.accountUuid : undefined,
+          organizationUuid:
+            typeof oauth.organizationUuid === 'string' ? oauth.organizationUuid : undefined,
         };
         snapshot.accountFile = candidate;
         break;
@@ -643,6 +692,10 @@ export interface WindowState {
   expectedAccountSource?: 'settings' | 'machine';
   /** True when the folder itself declares no CLAUDE_CONFIG_DIR. */
   isolated: boolean;
+  /** Every credential store found on this machine. Filled by `analyzeStores`. */
+  stores: StoreInfo[];
+  /** Stores holding the same account as each other — isolation that isn't. */
+  duplicateStores: DuplicateGroup[];
   /**
    * Version-control state of the folder's `.vscode/settings.json`. A tracked,
    * unmasked file means any CLAUDE_CONFIG_DIR written there is a repo change
@@ -818,6 +871,10 @@ export function readWindowState(
     expectedAccountSource: options.expectedAccountSource,
     isolated:
       overrides.terminalEnv[CONFIG_DIR_VAR] !== undefined || declaredSidebarDir !== undefined,
+    // Reading every store means scanning the home directory, so it is a
+    // separate, optional pass rather than part of the window read.
+    stores: [],
+    duplicateStores: [],
     settingsTracking: workspaceRoot
       ? trackingState(path.join(workspaceRoot, '.vscode', 'settings.json'))
       : 'untracked',
@@ -984,6 +1041,23 @@ export function auditProjects(projectsRoot: string): ProjectAudit[] {
   return audits.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+export interface StoreInfo {
+  /** `undefined` means the implicit default store, not `~/.claude`. */
+  configDir: string | undefined;
+  snapshot: AccountSnapshot;
+  /** Names of projects that declare this store. */
+  usedBy: string[];
+  /**
+   * Extra environment the consumer this store came from runs Claude under.
+   *
+   * Load-bearing for re-verification: a consumer's snapshot is shared with this
+   * entry by reference, so asking the CLI again without its env would replace a
+   * status that reports an `ANTHROPIC_API_KEY` with one that does not, and the
+   * key being billed would quietly stop showing up.
+   */
+  env: Record<string, string>;
+}
+
 /**
  * Every credential store we can find: those in use by this window, those any
  * sibling project declares, and any `~/.claude-*` directory sitting on disk.
@@ -991,16 +1065,21 @@ export function auditProjects(projectsRoot: string): ProjectAudit[] {
 export function discoverStores(
   state: WindowState,
   projectsRoot: string | undefined
-): { configDir: string | undefined; snapshot: AccountSnapshot; usedBy: string[] }[] {
-  const byKey = new Map<string, { configDir: string | undefined; snapshot: AccountSnapshot; usedBy: string[] }>();
+): StoreInfo[] {
+  const byKey = new Map<string, StoreInfo>();
 
-  const add = (snapshot: AccountSnapshot, usedBy?: string) => {
+  const add = (
+    snapshot: AccountSnapshot,
+    usedBy?: string,
+    env: Record<string, string> = {}
+  ) => {
     const key = storeKey(snapshot);
     const existing = byKey.get(key);
     if (existing) {
       // Prefer a verified snapshot over a disk-only one.
       if (!isVerified(existing.snapshot) && isVerified(snapshot)) {
         existing.snapshot = snapshot;
+        existing.env = env;
       }
       if (usedBy && !existing.usedBy.includes(usedBy)) {
         existing.usedBy.push(usedBy);
@@ -1011,11 +1090,12 @@ export function discoverStores(
       configDir: isExplicitDir(snapshot.source) ? snapshot.configDir : undefined,
       snapshot,
       usedBy: usedBy ? [usedBy] : [],
+      env,
     });
   };
 
   for (const consumer of realConsumers(state)) {
-    add(consumer.snapshot);
+    add(consumer.snapshot, undefined, consumer.env);
   }
 
   if (projectsRoot) {
@@ -1035,4 +1115,160 @@ export function discoverStores(
   }
 
   return [...byKey.values()];
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate accounts: two stores, one login
+// ---------------------------------------------------------------------------
+
+/**
+ * Identifiers for the account a store holds, any one of which matching another
+ * store means the two hold the same login.
+ *
+ * Two keys rather than one because the two sources know different things. The
+ * UUID comes only from disk and is the precise answer — it survives an email
+ * change and, paired with the organization, keeps one person's work and
+ * personal orgs apart, which is a legitimate reason to run two stores. The
+ * email comes from the live CLI as well, so it still identifies a store whose
+ * `.claude.json` predates the UUID or holds no `oauthAccount` at all.
+ *
+ * Returns nothing for a store with no login to compare: signed out, or an API
+ * key, which is authenticated but belongs to no account.
+ */
+export function accountKeys(snapshot: AccountSnapshot): string[] {
+  if (!isLoggedIn(snapshot) || usesApiKey(snapshot)) {
+    return [];
+  }
+
+  const keys: string[] = [];
+  const email = effectiveEmail(snapshot)?.trim().toLowerCase();
+  const disk = snapshot.account;
+
+  // Only trust the UUID while disk and CLI still describe the same person. A
+  // `.claude.json` left behind by a previous login would otherwise make an
+  // unrelated store look like a duplicate.
+  const diskEmail = disk?.email?.trim().toLowerCase();
+  if (disk?.accountUuid && (!email || !diskEmail || diskEmail === email)) {
+    keys.push(`uuid:${disk.accountUuid}|${disk.organizationUuid ?? ''}`);
+  }
+
+  if (email) {
+    const org = (effectiveOrg(snapshot) ?? cliStatus(snapshot)?.orgId ?? '').trim().toLowerCase();
+    keys.push(`email:${email}|${org}`);
+  }
+
+  return keys;
+}
+
+export interface DuplicateGroup {
+  /** The shared account, for display. */
+  email: string | undefined;
+  org: string | undefined;
+  /** The stores holding it — always two or more. */
+  stores: StoreInfo[];
+}
+
+/**
+ * Stores that are signed in as the same account as each other.
+ *
+ * This is the failure this extension exists to catch and the one state that
+ * looks entirely healthy from the outside: separate directories, separate
+ * Keychain entries, separate settings — and one login behind all of them, so
+ * nothing is actually isolated. It happens by default, because the browser
+ * reuses the claude.ai session you already have when you sign the second store
+ * in.
+ */
+export function duplicateAccountGroups(stores: StoreInfo[]): DuplicateGroup[] {
+  // Union-find, because a store can match one sibling by UUID and another by
+  // email; grouping by a single key would split one account into two groups.
+  const parent = stores.map((_, index) => index);
+  const find = (index: number): number => {
+    while (parent[index] !== index) {
+      parent[index] = parent[parent[index]];
+      index = parent[index];
+    }
+    return index;
+  };
+  const union = (a: number, b: number) => {
+    const rootA = find(a);
+    const rootB = find(b);
+    if (rootA !== rootB) {
+      parent[rootB] = rootA;
+    }
+  };
+
+  const firstWithKey = new Map<string, number>();
+  stores.forEach((store, index) => {
+    for (const key of accountKeys(store.snapshot)) {
+      const seen = firstWithKey.get(key);
+      if (seen === undefined) {
+        firstWithKey.set(key, index);
+      } else {
+        union(seen, index);
+      }
+    }
+  });
+
+  const groups = new Map<number, StoreInfo[]>();
+  stores.forEach((store, index) => {
+    if (accountKeys(store.snapshot).length === 0) {
+      return;
+    }
+    const root = find(index);
+    const group = groups.get(root);
+    if (group) {
+      group.push(store);
+    } else {
+      groups.set(root, [store]);
+    }
+  });
+
+  return [...groups.values()]
+    .filter(group => group.length > 1)
+    .map(group => ({
+      email: effectiveEmail(group[0].snapshot),
+      org: effectiveOrg(group[0].snapshot),
+      stores: group,
+    }));
+}
+
+/**
+ * Fill in `stores` and `duplicateStores`.
+ *
+ * Duplicates are found from disk first and only then confirmed with the CLI,
+ * for two reasons: a healthy machine spawns no subprocesses at all, and a
+ * `.claude.json` whose `oauthAccount` outlived its logout would otherwise
+ * accuse two stores of sharing an account neither one still holds.
+ */
+export async function analyzeStores(
+  state: WindowState,
+  projectsRoot: string | undefined,
+  claudePath?: string
+): Promise<void> {
+  state.stores = discoverStores(state, projectsRoot);
+
+  const suspects = duplicateAccountGroups(state.stores);
+  if (suspects.length === 0 || !claudePath) {
+    state.duplicateStores = suspects;
+    return;
+  }
+
+  await Promise.all(
+    suspects
+      .flatMap(group => group.stores)
+      .filter(store => !isVerified(store.snapshot))
+      .map(async store => {
+        const result = await verifyWithCli(
+          claudePath,
+          store.configDir,
+          store.env,
+          state.workspaceRoot
+        );
+        store.snapshot.verification = result.status
+          ? { kind: 'ok', status: result.status }
+          : { kind: 'failed', error: result.error ?? 'unknown error' };
+      })
+  );
+
+  state.duplicateStores = duplicateAccountGroups(state.stores);
 }

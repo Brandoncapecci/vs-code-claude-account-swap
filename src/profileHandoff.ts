@@ -17,8 +17,6 @@ export interface ProfileHandoff {
   /** Store to apply, or undefined for the implicit default store. */
   configDir?: string;
   account?: string;
-  /** Unknown when the editor's own profile UI collects the name. */
-  profileName?: string;
   createdAt: number;
 }
 

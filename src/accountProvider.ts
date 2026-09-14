@@ -4,6 +4,7 @@ import {
   AccountSnapshot,
   CONFIG_DIR_VAR,
   DEFAULT_CONFIG_DIR,
+  DuplicateGroup,
   ProjectAudit,
   ResolvedConsumer,
   WindowState,
@@ -13,6 +14,7 @@ import {
   effectiveEmail,
   effectiveOrg,
   isExplicitDir,
+  isLoggedIn,
   isVerified,
   primaryConsumer,
   realConsumers,
@@ -31,6 +33,14 @@ export class AccountItem extends vscode.TreeItem {
   copyValue?: string;
   /** File opened by claudeAccount.openFile. */
   filePath?: string;
+  /**
+   * The store this row is about, for the sign-in and sign-out commands. The
+   * wrapper distinguishes "no store on this row" from "the default store",
+   * whose configDir is legitimately undefined.
+   */
+  store?: { configDir: string | undefined; label: string; email?: string };
+  /** The stores this row says share one account. */
+  duplicate?: DuplicateGroup;
 
   constructor(id: string, label: string, collapsed?: vscode.TreeItemCollapsibleState) {
     super(label, collapsed ?? vscode.TreeItemCollapsibleState.None);
@@ -43,6 +53,15 @@ export class AccountItem extends vscode.TreeItem {
 
 function icon(id: string, color?: string): vscode.ThemeIcon {
   return new vscode.ThemeIcon(id, color ? new vscode.ThemeColor(color) : undefined);
+}
+
+/** The store a row acts on, keeping the unset case distinct from `~/.claude`. */
+function storeOf(snapshot: AccountSnapshot) {
+  return {
+    configDir: isExplicitDir(snapshot.source) ? snapshot.configDir : undefined,
+    label: storeLabel(snapshot),
+    email: effectiveEmail(snapshot),
+  };
 }
 
 /** Context for the verdict copy of a given consumer. */
@@ -202,6 +221,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     if (notIsolated) {
       items.push(notIsolated);
     }
+    items.push(...state.duplicateStores.map((group, index) => this.duplicateItem(group, index)));
     const leak = this.repoLeakItem(state);
     if (leak) {
       items.push(leak);
@@ -234,7 +254,12 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     item.iconPath = icon(copy.icon, copy.color);
     item.contextValue = 'copyable';
     item.copyValue = effectiveEmail(consumer.snapshot) ?? '';
-    item.command = { command: copy.command, title: copy.label };
+    // The headline reports the *worst* consumer, which is not always the
+    // terminal — so the click has to carry that consumer's store. Without it,
+    // "Not logged in" about the sidebar would offer to sign in to the
+    // terminal's store, which is signed in already and not what the row meant.
+    item.store = storeOf(consumer.snapshot);
+    item.command = { command: copy.command, title: copy.label, arguments: [item] };
 
     const tooltip = new vscode.MarkdownString(`${copy.detail}\n\n`);
     tooltip.appendMarkdown(accountTooltip(consumer.snapshot, consumer.name).value);
@@ -263,10 +288,11 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
         `On macOS, credentials are stored in the Keychain keyed by \`${CONFIG_DIR_VAR}\`, so a distinct dir is a fully distinct login. ` +
         `Leaving the variable unset is itself a distinct store — not the same as setting it to \`${tilde(DEFAULT_CONFIG_DIR)}\`.`
     );
-    item.contextValue = 'copyable';
+    item.contextValue = 'copyable store';
     item.copyValue = snapshot.configDir;
+    item.store = storeOf(snapshot);
     if (state.overrides.kind === 'parsed') {
-      item.contextValue = 'copyable openable';
+      item.contextValue = 'copyable openable store';
       item.filePath = state.overrides.file;
     }
     return item;
@@ -292,6 +318,53 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
         ? `This window inherits \`${CONFIG_DIR_VAR}\` from its environment, but the folder itself declares nothing — so the isolation is not part of the project and will not follow it.\n\nClick to give this folder its own account.`
         : `This folder declares no \`${CONFIG_DIR_VAR}\`, so it uses the same credential store as every other unconfigured project. Signing in here changes the account for all of them.\n\nClick to give this folder its own account.`
     );
+    return item;
+  }
+
+  /**
+   * Separate stores holding one login.
+   *
+   * Every other signal in this view reads healthy in that state — the dirs are
+   * distinct, the Keychain entries are distinct, each project points at its own
+   * — so without this row the only way to find out is to compare two accounts
+   * by hand. It is the default outcome of signing a second store in, because
+   * the browser reuses the claude.ai session already open.
+   */
+  private duplicateItem(group: DuplicateGroup, index: number): AccountItem {
+    const labels = group.stores.map(store => storeLabel(store.snapshot));
+    const item = new AccountItem(
+      `duplicate:${index}`,
+      group.stores.length === 2 ? 'Two stores, one account' : `${group.stores.length} stores, one account`
+    );
+    item.description = `all signed in as ${group.email ?? 'the same account'}`;
+    item.iconPath = icon('warning', WARN);
+    item.command = {
+      command: 'claudeAccount.fixDuplicateAccount',
+      title: 'Sign One In As A Different Account',
+      arguments: [item],
+    };
+    item.duplicate = group;
+
+    const tooltip = new vscode.MarkdownString();
+    tooltip.appendMarkdown(
+      `${labels.map(label => `\`${label}\``).join(' and ')} are separate credential stores, but ` +
+        `all of them are signed in as \`${group.email ?? 'one account'}\`` +
+        `${group.org ? ` (${group.org})` : ''}.\n\n` +
+        'Separate directories mean separate Keychain entries, so this looks isolated from every ' +
+        'other angle — but there is only one login behind them, and a project pinned to one is ' +
+        'using the same account as a project pinned to another.\n\n' +
+        'It usually happens because the browser reused the claude.ai session you already had. ' +
+        'Click to sign one of them in as a different account.'
+    );
+    const unverified = group.stores.filter(store => !isVerified(store.snapshot));
+    if (unverified.length > 0) {
+      tooltip.appendMarkdown(
+        `\n\n_Read from disk for ${unverified
+          .map(store => `\`${storeLabel(store.snapshot)}\``)
+          .join(', ')} — the CLI could not be asked._`
+      );
+    }
+    item.tooltip = tooltip;
     return item;
   }
 
@@ -497,8 +570,21 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
         tooltip.appendMarkdown(`\n\n_${consumer.caveat}_`);
       }
       child.tooltip = tooltip;
-      child.contextValue = 'copyable';
+      // Signing in belongs on the row that is signed out, where the store is
+      // named and visible — not in a command that has to ask which store it
+      // means before it can do anything.
+      child.contextValue = isLoggedIn(consumer.snapshot)
+        ? 'copyable store'
+        : 'copyable store signedOut';
       child.copyValue = consumer.snapshot.configDir;
+      child.store = storeOf(consumer.snapshot);
+      if (!isLoggedIn(consumer.snapshot)) {
+        child.command = {
+          command: 'claudeAccount.signInToStore',
+          title: 'Sign In',
+          arguments: [child],
+        };
+      }
       return child;
     });
     return item;
