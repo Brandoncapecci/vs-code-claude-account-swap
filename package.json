@@ -106,6 +106,12 @@
         "icon": "$(add)"
       },
       {
+        "command": "claudeAccount.useAccountHere",
+        "title": "Use This Account For This Project",
+        "category": "Claude Account",
+        "icon": "$(arrow-right)"
+      },
+      {
         "command": "claudeAccount.useAccountForThisProject",
         "title": "Use a Specific Account For This Project",
         "category": "Claude Account",
@@ -205,19 +211,29 @@
       ],
       "view/item/context": [
         {
+          "command": "claudeAccount.useAccountHere",
+          "when": "view == claudeAccountView && viewItem =~ /\\bswitchable\\b/",
+          "group": "inline@0"
+        },
+        {
           "command": "claudeAccount.signInToStore",
           "when": "view == claudeAccountView && viewItem =~ /\\bsignedOut\\b/",
-          "group": "inline"
+          "group": "inline@1"
         },
         {
           "command": "claudeAccount.copyValue",
           "when": "view == claudeAccountView && viewItem =~ /\\bcopyable\\b/",
-          "group": "inline"
+          "group": "inline@2"
         },
         {
           "command": "claudeAccount.openFile",
           "when": "view == claudeAccountView && viewItem =~ /\\bopenable\\b/",
           "group": "navigation"
+        },
+        {
+          "command": "claudeAccount.useAccountHere",
+          "when": "view == claudeAccountView && viewItem =~ /\\bswitchable\\b/",
+          "group": "1_auth@0"
         },
         {
           "command": "claudeAccount.signInToStore",
@@ -237,6 +253,10 @@
         },
         {
           "command": "claudeAccount.openFile",
+          "when": "false"
+        },
+        {
+          "command": "claudeAccount.useAccountHere",
           "when": "false"
         }
       ]

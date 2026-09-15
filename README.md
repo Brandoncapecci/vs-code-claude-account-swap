@@ -44,7 +44,8 @@ Anything read from disk rather than confirmed live is always labelled `(unverifi
 
 ## Other features
 
-- **Not isolated** — flags a folder that declares no store of its own, because signing in there silently changes the account for every other unconfigured project. One click fixes it.
+- **Accounts** — every credential store on this machine, which account each holds, which one this project is on, and duplicates marked inline. Arrows point the project at another one; right-click to sign in or out.
+- **Not isolated** — flags a project whose account falls through to the store every unconfigured project shares. Scoped deliberately: see below.
 - **Who uses what** — the terminal, the Claude Code sidebar, and this extension host resolve `CLAUDE_CONFIG_DIR` independently; each is verified separately and flagged when they disagree.
 - **Account overrides** — API keys in the environment or in any `settings.json` `env` block, plus settings files that failed to parse.
 - **Projects** — scans sibling folders and flags any two pointing at the same store, since those share one login.
@@ -65,6 +66,19 @@ The extension handles this rather than leaving you to `git update-index --skip-w
 For a shared repo that needs a non-default account, the cleanest option remains an external `.code-workspace` file kept outside the repo: workspace settings live in that file, so the repo stays untouched and no git masking is needed. Open the workspace file instead of the folder.
 
 Note that user settings alone cannot give two projects two different accounts — they apply everywhere. The workable pattern is *user settings for the account you use most, per-folder overrides for the exceptions.*
+
+## How far a sign-in reaches
+
+"Does this project have its own account" is really the question "who else would a sign-in here affect", and the two come apart as soon as an editor or terminal profile is involved. The view reads the answer off where `CLAUDE_CONFIG_DIR` is actually declared:
+
+| Scope | Declared by | A sign-in here reaches | Shown as |
+|---|---|---|---|
+| **Folder** | the folder's `.vscode/settings.json` | this project only | nothing — this is the goal |
+| **Profile** | a terminal profile, or user/profile settings | every project in this editor profile without its own | named on the store row |
+| **Environment** | the environment the editor was launched with | this window, and it does not follow the project | an informational row |
+| **None** | nothing, anywhere | every unconfigured project on the machine | the **Not isolated** warning |
+
+Only the last one is a trap. Warning about profile scope meant telling people that the setup **Fix Sidebar Account** had just built for them was broken — a per-project account for the native panel *has* to come from a profile, because the setting that controls it is machine-scoped.
 
 ## Three traps it detects
 
@@ -127,6 +141,7 @@ Two verbs cover the everyday work: **Switch Account** picks from the accounts yo
 | `Re-read Now` | Force a fresh read and re-verify. |
 | `Show Details` | Full report: the raw CLI JSON, a per-consumer verdict table, and every account on the machine. |
 | `Fix Two Stores Sharing One Account` | Sign one of the colliding stores in as a different account. |
+| `Use This Account For This Project` | The arrow on an **Accounts** row. Points this folder at that account, writing the setting wherever it already lives. |
 | `Sign In` / `Log Out…` | Act on one named store. On the tree row for that store, so there is never a "which one?" prompt. |
 
 ## How it works

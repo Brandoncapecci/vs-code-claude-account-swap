@@ -10,6 +10,7 @@ import {
   runSignInToStore,
   runSwitchAccount,
   runUseAccountForThisProject,
+  runUseAccountHere,
 } from './setupFlow';
 
 /**
@@ -110,6 +111,13 @@ export function registerCommands(
       'claudeAccount.fixDuplicateAccount',
       guarded('Fix Duplicate Account', (item?: unknown) =>
         runFixDuplicateAccount((item as AccountItem | undefined)?.duplicate, onDone)
+      )
+    ),
+
+    vscode.commands.registerCommand(
+      'claudeAccount.useAccountHere',
+      guarded('Use Account Here', (item?: unknown) =>
+        runUseAccountHere((item as AccountItem | undefined)?.store, onDone)
       )
     ),
 

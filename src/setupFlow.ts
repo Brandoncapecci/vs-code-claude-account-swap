@@ -282,24 +282,38 @@ async function chooseWriteTarget(
  * only scope VS Code reliably honours for it anyway. Both blocks are merged
  * rather than replaced so unrelated variables survive.
  */
-async function writeUserStore(configDir: string): Promise<void> {
+async function writeUserStore(configDir: string | undefined): Promise<void> {
+  // `undefined` is the implicit default store, and selecting it means *removing*
+  // the variable rather than writing a value: an explicit `~/.claude` is a
+  // different store, and writing `undefined` as a value would leave a malformed
+  // entry that every reader — this extension included — silently skips.
   const terminalEnv = vscode.workspace.getConfiguration('terminal.integrated.env');
-  const current = terminalEnv.get<Record<string, string>>(PLATFORM_KEY) ?? {};
+  const current = { ...(terminalEnv.get<Record<string, string>>(PLATFORM_KEY) ?? {}) };
+  if (configDir === undefined) {
+    delete current[CONFIG_DIR_VAR];
+  } else {
+    current[CONFIG_DIR_VAR] = configDir;
+  }
   await terminalEnv.update(
     PLATFORM_KEY,
-    { ...current, [CONFIG_DIR_VAR]: configDir },
+    Object.keys(current).length > 0 ? current : undefined,
     vscode.ConfigurationTarget.Global
   );
 
+  // Rewritten entry by entry rather than cleared wholesale, so unrelated
+  // variables someone put in this block survive.
   const claudeCode = vscode.workspace.getConfiguration('claudeCode');
-  const entries = [...(claudeCode.get<{ name: string; value: string }[]>('environmentVariables') ?? [])];
-  const index = entries.findIndex(entry => entry?.name === CONFIG_DIR_VAR);
-  if (index >= 0) {
-    entries[index] = { name: CONFIG_DIR_VAR, value: configDir };
-  } else {
+  const entries = [
+    ...(claudeCode.get<{ name: string; value: string }[]>('environmentVariables') ?? []),
+  ].filter(entry => entry?.name !== CONFIG_DIR_VAR);
+  if (configDir !== undefined) {
     entries.push({ name: CONFIG_DIR_VAR, value: configDir });
   }
-  await claudeCode.update('environmentVariables', entries, vscode.ConfigurationTarget.Global);
+  await claudeCode.update(
+    'environmentVariables',
+    entries.length > 0 ? entries : undefined,
+    vscode.ConfigurationTarget.Global
+  );
 }
 
 function slugify(value: string): string {
@@ -516,7 +530,7 @@ async function applyStore(input: {
 
   try {
     if (target === 'user') {
-      await writeUserStore(configDir!);
+      await writeUserStore(configDir);
     } else {
       const { file } = writeProjectAccountSettings(folderPath, { configDir }, formattingOptions());
       // Keep a committed settings file from carrying a personal path upstream.
@@ -647,6 +661,48 @@ export async function runSwitchAccount(onDone: () => void): Promise<void> {
 }
 
 /**
+ * Point this folder at one named account — the Accounts row's own action.
+ *
+ * Same tail as the switch, minus the picker: the row already names the account, so
+ * asking again which one is meant would be a question with one answer already
+ * on screen.
+ */
+export async function runUseAccountHere(
+  target: { configDir: string | undefined; label: string; email?: string } | undefined,
+  onDone: () => void
+): Promise<void> {
+  if (!target) {
+    await runSwitchAccount(onDone);
+    return;
+  }
+  const folder = await pickFolder();
+  if (!folder) {
+    return;
+  }
+  const folderPath = folder.uri.fsPath;
+  const folderName = path.basename(folderPath);
+
+  const state = await loadWindowState();
+  const current = primaryConsumer(state).snapshot;
+  if (loginTarget(current) === target.configDir) {
+    void vscode.window.showInformationMessage(
+      `${folderName} already uses ${target.email ?? target.label}.`
+    );
+    return;
+  }
+
+  await applyStore({
+    folderPath,
+    folderName,
+    state,
+    configDir: target.configDir,
+    email: target.email,
+    onDone,
+    target: existingWriteTarget(state),
+  });
+}
+
+/**
  * Fix a sidebar that resolves a different account from the terminal.
  *
  * There is no per-folder fix for `claudeCode.environmentVariables` itself: it is
@@ -763,13 +819,7 @@ export async function runFixSidebar(onDone: () => void): Promise<void> {
     return;
   }
 
-  if (dir) {
-    await writeUserStore(dir);
-  } else {
-    await vscode.workspace
-      .getConfiguration('claudeCode')
-      .update('environmentVariables', undefined, vscode.ConfigurationTarget.Global);
-  }
+  await writeUserStore(dir);
   onDone();
   const choice = await vscode.window.showInformationMessage(
     `The Claude Code sidebar will use ${account} in every project. Reload to apply.`,
@@ -853,13 +903,7 @@ export async function consumeProfileHandoff(onDone: () => void): Promise<void> {
   }
 
   try {
-    if (handoff.configDir) {
-      await writeUserStore(handoff.configDir);
-    } else {
-      await vscode.workspace
-        .getConfiguration('claudeCode')
-        .update('environmentVariables', undefined, vscode.ConfigurationTarget.Global);
-    }
+    await writeUserStore(handoff.configDir);
   } catch (err) {
     void vscode.window.showErrorMessage(
       `Could not finish profile setup: ${(err as Error).message}`

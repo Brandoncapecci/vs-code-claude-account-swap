@@ -7,6 +7,8 @@ import {
   DuplicateGroup,
   ProjectAudit,
   ResolvedConsumer,
+  StoreInfo,
+  StoreScope,
   WindowState,
   auditProjects,
   cliError,
@@ -55,6 +57,21 @@ function icon(id: string, color?: string): vscode.ThemeIcon {
   return new vscode.ThemeIcon(id, color ? new vscode.ThemeColor(color) : undefined);
 }
 
+/** Who else a sign-in in this window would reach, per scope. */
+const REACH: Record<StoreScope, string> = {
+  folder: 'Declared by this folder, so it applies to this project and nothing else.',
+  profile:
+    'Declared by your editor settings or a terminal profile, not by this folder — so every project in this editor profile without a store of its own uses it too.',
+  environment:
+    'Inherited from the environment this editor was launched with. Nothing declares it, so it does not follow the project.',
+  none: 'Nothing declares a store, so this is the one every unconfigured project shares.',
+};
+
+/** Whether two store references mean the same store, the unset case included. */
+function sameStore(a: string | undefined, b: string | undefined): boolean {
+  return a === undefined || b === undefined ? a === b : path.resolve(a) === path.resolve(b);
+}
+
 /** The store a row acts on, keeping the unset case distinct from `~/.claude`. */
 function storeOf(snapshot: AccountSnapshot) {
   return {
@@ -74,7 +91,7 @@ export function copyContextFor(state: WindowState, consumer: ResolvedConsumer) {
     offender: consumer.kind === 'terminal' ? undefined : consumer.name,
     apiKeySource: cliStatus(snapshot)?.apiKeySource,
     verified: isVerified(snapshot),
-    shared: !state.isolated,
+    shared: state.storeScope === 'none',
   };
 }
 
@@ -217,9 +234,9 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     }
     items.push(this.storeItem(state));
 
-    const notIsolated = this.notIsolatedItem(state);
-    if (notIsolated) {
-      items.push(notIsolated);
+    const scope = this.scopeItem(state);
+    if (scope) {
+      items.push(scope);
     }
     items.push(...state.duplicateStores.map((group, index) => this.duplicateItem(group, index)));
     const leak = this.repoLeakItem(state);
@@ -235,6 +252,10 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
       items.push(overrides);
     }
 
+    const accounts = this.accountsItem(state);
+    if (accounts) {
+      items.push(accounts);
+    }
     items.push(this.consumersItem(state));
 
     const projects = this.projectsItem(state);
@@ -285,6 +306,7 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
     item.iconPath = icon('folder-library');
     item.tooltip = new vscode.MarkdownString(
       `The credential store the integrated terminal uses.\n\n` +
+        `${REACH[state.storeScope]}\n\n` +
         `On macOS, credentials are stored in the Keychain keyed by \`${CONFIG_DIR_VAR}\`, so a distinct dir is a fully distinct login. ` +
         `Leaving the variable unset is itself a distinct store — not the same as setting it to \`${tilde(DEFAULT_CONFIG_DIR)}\`.`
     );
@@ -299,13 +321,40 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
   }
 
   /**
-   * The row that turns "this project shares a login" from an invisible default
-   * into a one-click fix.
+   * How far this window's account reaches, when that is worth saying.
+   *
+   * Only two of the four scopes get a row. A folder-declared store is the goal
+   * and needs no comment, and a profile-declared one is a deliberate setup —
+   * the one `Fix Sidebar Account` creates — so flagging it told people their
+   * working configuration was broken. The store row above already names the
+   * source in both cases.
    */
-  private notIsolatedItem(state: WindowState): AccountItem | undefined {
-    if (!state.workspaceRoot || state.isolated) {
+  private scopeItem(state: WindowState): AccountItem | undefined {
+    if (!state.workspaceRoot) {
       return undefined;
     }
+
+    if (state.storeScope === 'environment') {
+      const item = new AccountItem('scope:environment', 'Account comes from the environment');
+      item.description = 'will not follow this project';
+      item.iconPath = icon('info', INFO);
+      item.command = {
+        command: 'claudeAccount.useAccountForThisProject',
+        title: 'Use a Specific Account For This Project',
+      };
+      item.tooltip = new vscode.MarkdownString(
+        `This window inherits \`${CONFIG_DIR_VAR}\` from the environment it was launched with. ` +
+          'Nothing in the project or the editor declares it, so opening this folder any other way — ' +
+          'from the dock, or from a window that was not launched the same way — gets a different account.\n\n' +
+          'Click to declare it for this folder instead.'
+      );
+      return item;
+    }
+
+    if (state.storeScope !== 'none') {
+      return undefined;
+    }
+
     const item = new AccountItem('notIsolated', 'Not isolated');
     item.description = 'shares one login with every other project';
     item.iconPath = icon('warning', WARN);
@@ -313,11 +362,23 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
       command: 'claudeAccount.useAccountForThisProject',
       title: 'Use a Specific Account For This Project',
     };
-    item.tooltip = new vscode.MarkdownString(
-      state.processConfigDir
-        ? `This window inherits \`${CONFIG_DIR_VAR}\` from its environment, but the folder itself declares nothing — so the isolation is not part of the project and will not follow it.\n\nClick to give this folder its own account.`
-        : `This folder declares no \`${CONFIG_DIR_VAR}\`, so it uses the same credential store as every other unconfigured project. Signing in here changes the account for all of them.\n\nClick to give this folder its own account.`
+    // Terminal profiles that are not the default declare a store a new terminal
+    // will not get, so they cannot count toward the scope — but the tree lists
+    // them under "Who uses what", and a tooltip flatly denying they exist would
+    // contradict it.
+    const otherProfiles = state.consumers.filter(consumer => consumer.kind === 'terminalProfile');
+    const tooltip = new vscode.MarkdownString(
+      `Nothing this project or your settings declares sets \`${CONFIG_DIR_VAR}\`, and neither does the default terminal profile — so this project uses the same credential store as every other unconfigured project. Signing in here changes the account for all of them.`
     );
+    if (otherProfiles.length > 0) {
+      tooltip.appendMarkdown(
+        `\n\n${otherProfiles.map(consumer => `\`${consumer.name}\``).join(' and ')} ` +
+          `${otherProfiles.length === 1 ? 'does declare a store, but it is not' : 'do declare stores, but they are not'} ` +
+          'the default profile, so a terminal opened normally does not use it.'
+      );
+    }
+    tooltip.appendMarkdown('\n\nClick to give this folder its own account.');
+    item.tooltip = tooltip;
     return item;
   }
 
@@ -588,6 +649,122 @@ export class AccountProvider implements vscode.TreeDataProvider<AccountItem>, vs
       return child;
     });
     return item;
+  }
+
+  /**
+   * Every account on this machine, and which one this project is on.
+   *
+   * The roster belongs in the view rather than only in the details report:
+   * "are my accounts actually separate, and am I on the right one" is the
+   * question the extension exists for, and answering it used to mean opening a
+   * report. It is also the natural home for signing in and out, which act on a
+   * store — so the row names the store instead of a command asking for one.
+   */
+  private accountsItem(state: WindowState): AccountItem | undefined {
+    if (state.stores.length === 0) {
+      return undefined;
+    }
+    const current = storeOf(primaryConsumer(state).snapshot);
+    const signedIn = state.stores.filter(store => effectiveEmail(store.snapshot));
+
+    const item = new AccountItem(
+      'accounts',
+      'Accounts',
+      vscode.TreeItemCollapsibleState.Expanded
+    );
+    // Counted from the group, not assumed: a group can hold three or more.
+    const shared =
+      state.duplicateStores.length === 1
+        ? `${state.duplicateStores[0].stores.length} sharing one account`
+        : `${state.duplicateStores.length} accounts shared`;
+    item.description =
+      state.duplicateStores.length > 0
+        ? `${signedIn.length} signed in, ${shared}`
+        : `${signedIn.length} signed in`;
+    item.iconPath = state.duplicateStores.length > 0 ? icon('warning', WARN) : icon('organization');
+    item.tooltip = new vscode.MarkdownString(
+      'Every credential store found on this machine: the ones this window uses, the ones sibling ' +
+        `projects declare, and any \`~/.claude-*\` directory on disk.\n\n` +
+        'Use the arrows to point this project at one, or right-click to sign in or out.'
+    );
+
+    item.children = [...state.stores]
+      .sort((a, b) => (effectiveEmail(a.snapshot) ?? '~').localeCompare(effectiveEmail(b.snapshot) ?? '~'))
+      .map(store => this.accountChild(store, state, current));
+    return item;
+  }
+
+  private accountChild(
+    store: StoreInfo,
+    state: WindowState,
+    current: { configDir: string | undefined }
+  ): AccountItem {
+    const email = effectiveEmail(store.snapshot);
+    const isCurrent = sameStore(store.configDir, current.configDir);
+    const shared = state.duplicateStores.find(group => group.stores.includes(store));
+    // An API key authenticates with no account attached, so `loggedIn` and "has
+    // an email" are different questions. Reading the first off the second would
+    // label a working store as signed out and offer to sign it in.
+    const apiKey = cliStatus(store.snapshot)?.apiKeySource;
+    const signedOut = !isLoggedIn(store.snapshot);
+
+    const child = new AccountItem(
+      `account:${store.configDir ?? 'default'}`,
+      email ?? storeLabel(store.snapshot)
+    );
+    child.description = [
+      email ? storeLabel(store.snapshot) : apiKey ? `API key: ${apiKey}` : 'signed out',
+      isCurrent ? 'current' : undefined,
+      shared ? 'shares this account' : undefined,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+
+    child.iconPath = shared
+      ? icon('warning', WARN)
+      : apiKey
+        ? icon('key', ERROR)
+        : isCurrent
+          ? icon('check', PASS)
+          : email
+            ? icon('account')
+            : icon('circle-outline');
+
+    const tooltip = accountTooltip(store.snapshot, email ?? storeLabel(store.snapshot));
+    if (store.usedBy.length > 0) {
+      tooltip.appendMarkdown(`\n\n_Used by: ${store.usedBy.join(', ')}._`);
+    }
+    if (shared) {
+      tooltip.appendMarkdown(
+        `\n\n**Also held by ${shared.stores
+          .filter(other => other !== store)
+          .map(other => `\`${storeLabel(other.snapshot)}\``)
+          .join(', ')}** — these are not separate accounts.`
+      );
+    }
+    tooltip.appendMarkdown(
+      isCurrent
+        ? '\n\n_This is the account this project uses._'
+        : '\n\n_Use the arrows to point this project at it._'
+    );
+    child.tooltip = tooltip;
+
+    // `switchable` drives the inline arrows, so the current account does not
+    // offer to switch to itself.
+    child.contextValue = [
+      'copyable',
+      'store',
+      'account',
+      signedOut ? 'signedOut' : undefined,
+      // Switching to a store with no account would drop into a sign-in flow,
+      // which is the Sign In action's job and not what an arrow should mean.
+      isCurrent || !email ? undefined : 'switchable',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    child.copyValue = email ?? store.snapshot.configDir;
+    child.store = storeOf(store.snapshot);
+    return child;
   }
 
   private projectsItem(state: WindowState): AccountItem | undefined {

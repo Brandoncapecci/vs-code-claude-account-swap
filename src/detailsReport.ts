@@ -1,4 +1,5 @@
 import {
+  StoreScope,
   WindowState,
   cliError,
   cliStatus,
@@ -12,6 +13,14 @@ import {
 import { copyContextFor, windowCopy } from './accountProvider';
 import { verdictCopy } from './verdictCopy';
 import { freshnessLine } from './statusBar';
+
+/** How far this window's account reaches, per scope. */
+const SCOPE_NOTE: Record<StoreScope, string> = {
+  folder: 'declared by this folder, so it applies here and nowhere else',
+  profile: 'declared by your settings or a terminal profile, so every project in this editor profile shares it',
+  environment: 'inherited from the environment this editor was launched with, so it does not follow the project',
+  none: 'nothing declares a store, so this shares one with every unconfigured project',
+};
 
 /** The full report, opened as a markdown document. */
 export function detailsMarkdown(state: WindowState): string {
@@ -27,7 +36,7 @@ export function detailsMarkdown(state: WindowState): string {
 
   if (state.workspaceRoot) {
     lines.push(
-      `**Folder:** \`${tilde(state.workspaceRoot)}\`${state.isolated ? '' : ' — not isolated, shares a store with every unconfigured project'}`,
+      `**Folder:** \`${tilde(state.workspaceRoot)}\` — ${SCOPE_NOTE[state.storeScope]}`,
       ''
     );
   }

@@ -160,7 +160,7 @@ function base(verdict: Verdict, ctx: VerdictContext): VerdictCopy {
             color: INFO,
             treeDescription: `signed in as ${email} — click to pin`,
             statusText: email,
-            detail: `This project has its own store (${ctx.store}) signed in as \`${email}\`. Nothing is pinned yet, so no check is being made — pin it and the view will tell you whenever the account changes.`,
+            detail: `This project uses ${ctx.store}, signed in as \`${email}\`. Nothing is pinned yet, so no check is being made — pin it and the view will tell you whenever the account changes.`,
             command: 'claudeAccount.setExpectedAccount',
           };
   }

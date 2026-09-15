@@ -690,7 +690,12 @@ export interface WindowState {
   expectedAccount?: string;
   /** Where that pin lives, so the UI can explain how to change it. */
   expectedAccountSource?: 'settings' | 'machine';
-  /** True when the folder itself declares no CLAUDE_CONFIG_DIR. */
+  /**
+   * Where the account this window uses is declared, which is what decides who
+   * else a sign-in here would affect.
+   */
+  storeScope: StoreScope;
+  /** True when the folder itself declares a CLAUDE_CONFIG_DIR. */
   isolated: boolean;
   /** Every credential store found on this machine. Filled by `analyzeStores`. */
   stores: StoreInfo[];
@@ -704,9 +709,36 @@ export interface WindowState {
   settingsTracking: TrackingState;
 }
 
-/** Store identity: a dir plus whether the variable is set at all. */
+/**
+ * How far a sign-in in this window reaches.
+ *
+ * The distinction the boolean it replaced could not make: a store named by an
+ * editor or terminal profile is not per-project, but it is a deliberate,
+ * scoped choice — the very thing `Fix Sidebar Account` sets up — and warning
+ * about it told people their working setup was broken. Only `none` means the
+ * account falls through to the store every unconfigured project everywhere
+ * shares, which is the trap worth a warning.
+ */
+export type StoreScope =
+  /** The folder's own `.vscode/settings.json`. Reaches this project only. */
+  | 'folder'
+  /** A terminal profile, or user/profile settings. Reaches this editor profile. */
+  | 'profile'
+  /** Inherited from the environment the editor was launched with. */
+  | 'environment'
+  /** Nothing declares one, so this is the shared default store. */
+  | 'none';
+
+/**
+ * Store identity: a dir plus whether the variable is set at all.
+ *
+ * Resolved rather than compared raw, because `expandHome` normalizes but does
+ * not strip a trailing separator — so `~/.claude-work/` in settings and
+ * `~/.claude-work` from the home scan are one directory that would otherwise
+ * be listed, and offered to pick from, twice.
+ */
 export function storeKey(snapshot: AccountSnapshot): string {
-  return `${isExplicitDir(snapshot.source)}|${snapshot.configDir}`;
+  return `${isExplicitDir(snapshot.source)}|${path.resolve(snapshot.configDir)}`;
 }
 
 function snapshotFor(explicit: string | undefined, source: ConfigDirSource, baseDir?: string): AccountSnapshot {
@@ -869,6 +901,14 @@ export function readWindowState(
     settingsProblems: apiKeys.problems,
     expectedAccount: options.expectedAccount,
     expectedAccountSource: options.expectedAccountSource,
+    storeScope: scopeOf({
+      folder: overrides.terminalEnv[CONFIG_DIR_VAR] !== undefined || declaredSidebarDir !== undefined,
+      profile:
+        defaultProfile !== undefined ||
+        settingsTerminalEnv[CONFIG_DIR_VAR] !== undefined ||
+        sidebarDir !== undefined,
+      environment: processConfigDir !== undefined,
+    }),
     isolated:
       overrides.terminalEnv[CONFIG_DIR_VAR] !== undefined || declaredSidebarDir !== undefined,
     // Reading every store means scanning the home directory, so it is a
@@ -879,6 +919,17 @@ export function readWindowState(
       ? trackingState(path.join(workspaceRoot, '.vscode', 'settings.json'))
       : 'untracked',
   };
+}
+
+/** Narrowest declaration wins: it is the one VS Code actually applies. */
+function scopeOf(found: { folder: boolean; profile: boolean; environment: boolean }): StoreScope {
+  if (found.folder) {
+    return 'folder';
+  }
+  if (found.profile) {
+    return 'profile';
+  }
+  return found.environment ? 'environment' : 'none';
 }
 
 /** The two scopes a folder's CLAUDE_CONFIG_DIR can be written to. */

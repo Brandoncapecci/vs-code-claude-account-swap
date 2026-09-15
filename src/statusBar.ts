@@ -99,7 +99,7 @@ export class StatusBar implements vscode.Disposable {
       ? ['Fix Sidebar Account', 'Show Details', "Don't Show Again"]
       : verdict === 'api-key'
       ? ['Show Details', "Don't Show Again"]
-      : state.isolated
+      : state.storeScope !== 'none'
         ? ['Sign In…', 'Show Details', "Don't Show Again"]
         : ['Use a Different Account Here', 'Show Details', "Don't Show Again"];
 
